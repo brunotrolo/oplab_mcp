@@ -573,41 +573,45 @@ function pick(obj: Record<string, unknown>, keys: string[]): Record<string, unkn
 }
 
 // ---------------------------------------------------------------------------
-// MCP Server factory
+// Global MCP server — single instance, handlers registered once
 // ---------------------------------------------------------------------------
 
-function createMcpServer(client: AxiosInstance): Server {
-  const server = new Server(
-    { name: "oplab-mcp-server", version: "1.0.0" },
-    { capabilities: { tools: {} } }
-  );
-
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: TOOL_REGISTRY.map((t) => t.tool),
-  }));
-
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
-    const { name, arguments: args = {} } = request.params;
-    const entry = TOOL_REGISTRY.find((t) => t.tool.name === name);
-
-    if (!entry) {
-      return { content: [{ type: "text", text: `Ferramenta desconhecida: ${name}` }], isError: true };
-    }
-
-    try {
-      const { path, params } = entry.build(args as Record<string, unknown>);
-      const { data } = await client.get(path, { params });
-      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
-    } catch (error) {
-      const message = axios.isAxiosError(error)
-        ? `Erro OpLab [${error.response?.status}]: ${JSON.stringify(error.response?.data)}`
-        : String(error);
-      return { content: [{ type: "text", text: message }], isError: true };
-    }
-  });
-
-  return server;
+let oplabClient: AxiosInstance;
+try {
+  oplabClient = createOplabClient();
+} catch (err) {
+  console.error(err);
+  process.exit(1);
 }
+
+const mcpServer = new Server(
+  { name: "oplab-mcp-server", version: "1.0.0" },
+  { capabilities: { tools: {} } }
+);
+
+mcpServer.setRequestHandler(ListToolsRequestSchema, async () => ({
+  tools: TOOL_REGISTRY.map((t) => t.tool),
+}));
+
+mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
+  const { name, arguments: args = {} } = request.params;
+  const entry = TOOL_REGISTRY.find((t) => t.tool.name === name);
+
+  if (!entry) {
+    return { content: [{ type: "text", text: `Ferramenta desconhecida: ${name}` }], isError: true };
+  }
+
+  try {
+    const { path, params } = entry.build(args as Record<string, unknown>);
+    const { data } = await oplabClient.get(path, { params });
+    return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+  } catch (error) {
+    const message = axios.isAxiosError(error)
+      ? `Erro OpLab [${error.response?.status}]: ${JSON.stringify(error.response?.data)}`
+      : String(error);
+    return { content: [{ type: "text", text: message }], isError: true };
+  }
+});
 
 // ---------------------------------------------------------------------------
 // Express + SSE transport
@@ -618,25 +622,14 @@ app.use(express.json());
 
 const transports = new Map<string, SSEServerTransport>();
 
-let oplabClient: AxiosInstance;
-try {
-  oplabClient = createOplabClient();
-} catch (err) {
-  console.error(err);
-  process.exit(1);
-}
-
 app.get("/health", (_req: Request, res: Response) => {
   res.json({ status: "ok", tools: TOOL_REGISTRY.length });
 });
 
-app.get("/sse", async (req: Request, res: Response) => {
+app.get("/sse", async (_req: Request, res: Response) => {
   const transport = new SSEServerTransport("/messages", res);
-  const mcpServer = createMcpServer(oplabClient);
-
   transports.set(transport.sessionId, transport);
   res.on("close", () => transports.delete(transport.sessionId));
-
   await mcpServer.connect(transport);
 });
 
