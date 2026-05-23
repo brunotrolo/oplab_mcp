@@ -1,0 +1,43 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm run build)",
+      "Bash(npm install*)",
+      "Bash(npm start)",
+      "Bash(npm run*)",
+      "Bash(node*)",
+      "Bash(tsc*)",
+      "Bash(curl http://localhost*)",
+      "Bash(git status)",
+      "Bash(git diff*)",
+      "Bash(git log*)",
+      "Bash(git add*)",
+      "Bash(git commit*)",
+      "Bash(git push*)",
+      "Bash(git pull*)",
+      "Bash(git fetch*)",
+      "Bash(git branch*)",
+      "Bash(docker build*)",
+      "Bash(gcloud builds submit*)",
+      "Bash(gcloud run deploy*)",
+      "Bash(gcloud run services*)",
+      "Bash(gcloud artifacts*)",
+      "Bash(gcloud secrets*)",
+      "Bash(gcloud auth*)",
+      "Bash(gcloud config*)",
+      "Bash(ls*)",
+      "Bash(cat*)",
+      "Bash(grep*)",
+      "Bash(find*)",
+      "Bash(mkdir*)",
+      "Bash(python3*)"
+    ],
+    "deny": [
+      "Bash(rm -rf*)",
+      "Bash(git push --force*)",
+      "Bash(git reset --hard*)",
+      "Bash(gcloud run services delete*)",
+      "Bash(gcloud secrets delete*)"
+    ]
+  }
+}
