@@ -367,6 +367,20 @@ function pick(obj: Record<string, unknown>, keys: string[]): Record<string, unkn
   );
 }
 
+// Retry helper — retries only on 5xx transient errors with exponential backoff
+async function withRetry<T>(fn: () => Promise<T>, attempts = 3): Promise<T> {
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fn();
+    } catch (e) {
+      const isServerError = axios.isAxiosError(e) && (e.response?.status ?? 0) >= 500;
+      if (i === attempts - 1 || !isServerError) throw e;
+      await new Promise<void>((r) => setTimeout(r, 2 ** i * 1_000));
+    }
+  }
+  throw new Error("unreachable");
+}
+
 // Static tool list derived from TOOL_REGISTRY — returned verbatim by ListTools
 const TOOLS_LIST = TOOL_REGISTRY.map(({ name, description, properties, required }) => ({
   name,
@@ -401,14 +415,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     return { content: [{ type: "text" as const, text: `Ferramenta desconhecida: ${name}` }], isError: true };
   }
 
+  const start = Date.now();
+  console.log(JSON.stringify({ event: "tool_call", tool: name }));
   try {
     const { path, params } = entry.build(args as Record<string, unknown>);
-    const { data } = await oplabClient.get(path, { params });
+    const { data } = await withRetry(() => oplabClient.get(path, { params }));
+    console.log(JSON.stringify({ event: "tool_ok", tool: name, ms: Date.now() - start }));
     return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
   } catch (error) {
     const message = axios.isAxiosError(error)
       ? `Erro OpLab [${error.response?.status}]: ${JSON.stringify(error.response?.data)}`
       : String(error);
+    console.error(JSON.stringify({ event: "tool_error", tool: name, ms: Date.now() - start, error: message }));
     return { content: [{ type: "text" as const, text: message }], isError: true };
   }
 });
@@ -421,8 +439,13 @@ const app = express();
 
 let sseTransport: SSEServerTransport | null = null;
 
-app.get("/health", (_req: Request, res: Response) => {
-  res.json({ status: "ok", tools: TOOL_REGISTRY.length });
+app.get("/health", async (_req: Request, res: Response) => {
+  try {
+    await oplabClient.get("/market/status", { timeout: 5_000 });
+    res.json({ status: "ok", tools: TOOL_REGISTRY.length, api: "reachable" });
+  } catch {
+    res.json({ status: "ok", tools: TOOL_REGISTRY.length, api: "unreachable" });
+  }
 });
 
 app.get("/sse", async (_req: Request, res: Response) => {
@@ -433,6 +456,9 @@ app.get("/sse", async (_req: Request, res: Response) => {
   }
   sseTransport = new SSEServerTransport("/messages", res);
   await server.connect(sseTransport);
+  // Keep connection alive — Cloud Run suspends CPU on idle SSE streams without this
+  const heartbeat = setInterval(() => res.write(": ping\n\n"), 30_000);
+  res.on("close", () => clearInterval(heartbeat));
 });
 
 app.post("/messages", express.text({ type: "application/json" }), async (req: Request, res: Response) => {
@@ -451,4 +477,10 @@ app.listen(PORT, () => {
   console.log(`  SSE  → GET  http://localhost:${PORT}/sse`);
   console.log(`  Msgs → POST http://localhost:${PORT}/messages?sessionId=<id>`);
   console.log(`  Health → GET http://localhost:${PORT}/health`);
+});
+
+process.on("SIGTERM", async () => {
+  console.log(JSON.stringify({ event: "shutdown" }));
+  if (sseTransport) await sseTransport.close();
+  process.exit(0);
 });
