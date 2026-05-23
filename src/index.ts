@@ -441,7 +441,7 @@ app.get("/sse", async (_req: Request, res: Response) => {
   await server.connect(sseTransport);
 });
 
-app.post("/messages", async (req: Request, res: Response) => {
+app.post("/messages", express.text({ type: "application/json" }), async (req: Request, res: Response) => {
   await sseTransport?.handlePostMessage(req, res);
 });
 
