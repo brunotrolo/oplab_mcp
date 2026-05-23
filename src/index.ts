@@ -1,8 +1,8 @@
 import express, { Request, Response } from "express";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
+import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import axios, { AxiosInstance } from "axios";
-import { z } from "zod";
 
 // ---------------------------------------------------------------------------
 // OpLab API client
@@ -367,28 +367,15 @@ function pick(obj: Record<string, unknown>, keys: string[]): Record<string, unkn
   );
 }
 
-function propToZod(prop: PropDef, isRequired: boolean): z.ZodTypeAny {
-  const enumVals = prop.enum;
-  let schema: z.ZodTypeAny;
-
-  if (enumVals && enumVals.length > 0) {
-    schema = z.enum(enumVals as [string, ...string[]]);
-  } else if (prop.type === "integer") {
-    schema = z.number().int();
-  } else if (prop.type === "number") {
-    schema = z.number();
-  } else if (prop.type === "boolean") {
-    schema = z.boolean();
-  } else {
-    schema = z.string();
-  }
-
-  if (prop.description) schema = schema.describe(prop.description);
-  return isRequired ? schema : schema.optional();
-}
+// Static tool list derived from TOOL_REGISTRY — returned verbatim by ListTools
+const TOOLS_LIST = TOOL_REGISTRY.map(({ name, description, properties, required }) => ({
+  name,
+  description,
+  inputSchema: { type: "object" as const, properties, required },
+}));
 
 // ---------------------------------------------------------------------------
-// Global OpLab client + McpServer — instantiated once at module load
+// Global MCP server — singleton, handlers registered once at module load
 // ---------------------------------------------------------------------------
 
 let oplabClient: AxiosInstance;
@@ -399,30 +386,32 @@ try {
   process.exit(1);
 }
 
-const server = new McpServer({ name: "oplab-mcp-server", version: "1.0.0" });
+const server = new Server(
+  { name: "oplab-mcp-server", version: "1.0.0" },
+  { capabilities: { tools: {} } }
+);
 
-for (const entry of TOOL_REGISTRY) {
-  const shape: Record<string, z.ZodTypeAny> = Object.fromEntries(
-    Object.entries(entry.properties).map(([k, v]) => [
-      k,
-      propToZod(v, entry.required.includes(k)),
-    ])
-  );
+server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS_LIST }));
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- dynamic shape defeats TS generic inference; Zod validates at runtime
-  (server.registerTool as any)(entry.name, { description: entry.description, inputSchema: shape }, async (args: Record<string, unknown>) => {
-    try {
-      const { path, params } = entry.build(args);
-      const { data } = await oplabClient.get(path, { params });
-      return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
-    } catch (error) {
-      const message = axios.isAxiosError(error)
-        ? `Erro OpLab [${error.response?.status}]: ${JSON.stringify(error.response?.data)}`
-        : String(error);
-      return { content: [{ type: "text" as const, text: message }], isError: true };
-    }
-  });
-}
+server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  const { name, arguments: args = {} } = request.params;
+  const entry = TOOL_REGISTRY.find((t) => t.name === name);
+
+  if (!entry) {
+    return { content: [{ type: "text" as const, text: `Ferramenta desconhecida: ${name}` }], isError: true };
+  }
+
+  try {
+    const { path, params } = entry.build(args as Record<string, unknown>);
+    const { data } = await oplabClient.get(path, { params });
+    return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
+  } catch (error) {
+    const message = axios.isAxiosError(error)
+      ? `Erro OpLab [${error.response?.status}]: ${JSON.stringify(error.response?.data)}`
+      : String(error);
+    return { content: [{ type: "text" as const, text: message }], isError: true };
+  }
+});
 
 // ---------------------------------------------------------------------------
 // Express + SSE transport
@@ -437,6 +426,11 @@ app.get("/health", (_req: Request, res: Response) => {
 });
 
 app.get("/sse", async (_req: Request, res: Response) => {
+  // Close any previous transport so Protocol.connect() doesn't throw "Already connected"
+  if (sseTransport) {
+    await sseTransport.close();
+    sseTransport = null;
+  }
   sseTransport = new SSEServerTransport("/messages", res);
   await server.connect(sseTransport);
 });
