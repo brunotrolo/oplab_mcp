@@ -15,23 +15,18 @@ import axios, { AxiosInstance } from "axios";
 const OPLAB_BASE_URL = "https://api.oplab.com.br/v3";
 
 function createOplabClient(): AxiosInstance {
-  const token = process.env.OPLAB_ACCESS_TOKEN;
+  const token = process.env.OPLAB_ACCESS_TOKEN?.trim();
   if (!token) throw new Error("OPLAB_ACCESS_TOKEN environment variable is required");
 
-  const client = axios.create({
+  return axios.create({
     baseURL: OPLAB_BASE_URL,
-    headers: { "Access-Token": String(token).trim(), "Content-Type": "application/json" },
+    headers: {
+      "Access-Token": token,
+      "Accept": "application/json",
+      "Content-Type": "application/json",
+    },
     timeout: 15_000,
   });
-
-  // Inject access_token as query param on every request (allowed by OpLab docs)
-  // so the token survives proxies that strip custom headers.
-  client.interceptors.request.use((config) => {
-    config.params = { access_token: String(token).trim(), ...config.params };
-    return config;
-  });
-
-  return client;
 }
 
 // ---------------------------------------------------------------------------
