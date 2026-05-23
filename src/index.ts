@@ -442,7 +442,8 @@ app.get("/sse", async (_req: Request, res: Response) => {
 });
 
 app.post("/messages", express.text({ type: "application/json" }), async (req: Request, res: Response) => {
-  await sseTransport?.handlePostMessage(req, res);
+  // Pass req.body (string) as parsedBody so handlePostMessage skips raw-body stream reading
+  await sseTransport?.handlePostMessage(req, res, req.body as string);
 });
 
 // ---------------------------------------------------------------------------
