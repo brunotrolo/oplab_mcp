@@ -429,7 +429,6 @@ for (const entry of TOOL_REGISTRY) {
 // ---------------------------------------------------------------------------
 
 const app = express();
-app.use(express.json());
 
 let sseTransport: SSEServerTransport | null = null;
 
@@ -443,11 +442,7 @@ app.get("/sse", async (_req: Request, res: Response) => {
 });
 
 app.post("/messages", async (req: Request, res: Response) => {
-  if (sseTransport) {
-    await sseTransport.handlePostMessage(req, res);
-  } else {
-    res.status(400).json({ error: "Nenhuma sessão SSE ativa encontrada" });
-  }
+  await sseTransport?.handlePostMessage(req, res);
 });
 
 // ---------------------------------------------------------------------------
