@@ -3,6 +3,7 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import axios, { AxiosInstance } from "axios";
+import { getIVRankHistorico, getIVRankBulk, normalizarPeriodo } from "./utils/iv_calculator.js";
 
 // ---------------------------------------------------------------------------
 // OpLab API client
@@ -33,6 +34,7 @@ interface PropDef {
   type?: string;
   description?: string;
   enum?: string[];
+  items?: { type: string };
 }
 
 interface ToolDef {
@@ -40,7 +42,10 @@ interface ToolDef {
   description: string;
   properties: Record<string, PropDef>;
   required: string[];
-  build: (args: Record<string, unknown>) => { path: string; params?: Record<string, unknown> };
+  // Ferramentas simples: mapeiam 1:1 para um GET na OpLab.
+  build?: (args: Record<string, unknown>) => { path: string; params?: Record<string, unknown> };
+  // Ferramentas compostas: lógica própria (múltiplas chamadas, cálculo, cache).
+  handler?: (client: AxiosInstance, args: Record<string, unknown>) => Promise<unknown>;
 }
 
 const TOOL_REGISTRY: ToolDef[] = [
@@ -355,6 +360,28 @@ const TOOL_REGISTRY: ToolDef[] = [
     required: ["uid"],
     build: (a) => ({ path: `/market/exchanges/${a.uid}` }),
   },
+
+  // ── Volatilidade Implícita — IV Rank ────────────────────────────────────────
+  {
+    name: "get_iv_rank_historico",
+    description: "Calcular IV Rank e IV Percentile históricos de um ativo: compara a volatilidade implícita atual (iv_current da OpLab) com a faixa histórica de volatilidade realizada de 21 dias (anualizada). Retorna classificação operacional (MUITO_ALTA, ALTA, MEDIA, BAIXA), sinal de venda de opções e histórico mensal. Usa cache em memória de 4h.",
+    properties: {
+      ticker:  { type: "string",  description: "Código da ação (ex: VALE3, PETR4)" },
+      periodo: { type: "integer", description: "Janela em dias úteis para o IV Rank. Padrão: 252. Aceita: 21, 63, 126, 252" },
+    },
+    required: ["ticker"],
+    handler: (client, a) => getIVRankHistorico(client, String(a.ticker), normalizarPeriodo(a.periodo)),
+  },
+  {
+    name: "get_iv_rank_bulk",
+    description: "Calcular IV Rank de vários ativos de uma vez e ranquear por IV Rank decrescente. Sem o parâmetro 'tickers', usa a whitelist padrão de 24 ativos líquidos. Usa cache de 4h (tickers em cache não consomem chamadas) e processa os demais em lotes de 3 com 300ms entre lotes para evitar rate limit (HTTP 429). Ideal para triagem de oportunidades de venda de opções.",
+    properties: {
+      tickers: { type: "array",   description: "Lista de códigos de ações (ex: [\"VALE3\",\"PETR4\"]). Se omitido, usa a whitelist padrão de 24 ativos.", items: { type: "string" } },
+      periodo: { type: "integer", description: "Janela em dias úteis para o IV Rank. Padrão: 252. Aceita: 21, 63, 126, 252" },
+    },
+    required: [],
+    handler: (client, a) => getIVRankBulk(client, a.tickers as string[] | undefined, normalizarPeriodo(a.periodo)),
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -418,8 +445,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const start = Date.now();
   console.log(JSON.stringify({ event: "tool_call", tool: name }));
   try {
-    const { path, params } = entry.build(args as Record<string, unknown>);
-    const { data } = await withRetry(() => oplabClient.get(path, { params }));
+    // Ferramentas compostas usam handler próprio; as simples mapeiam para um GET.
+    const data = entry.handler
+      ? await entry.handler(oplabClient, args as Record<string, unknown>)
+      : await withRetry(async () => {
+          const { path, params } = entry.build!(args as Record<string, unknown>);
+          return (await oplabClient.get(path, { params })).data;
+        });
     console.log(JSON.stringify({ event: "tool_ok", tool: name, ms: Date.now() - start }));
     return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
   } catch (error) {

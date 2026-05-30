@@ -6,9 +6,11 @@ Este arquivo descreve a arquitetura, padrões e regras de manutenção do **OpLa
 
 ## Contexto do Projeto
 
-Servidor MCP (Model Context Protocol) em TypeScript/Express que expõe 29 ferramentas da API REST da OpLab v3, via transporte SSE, hospedado no Google Cloud Run (região `us-east1`).
+Servidor MCP (Model Context Protocol) em TypeScript/Express que expõe 31 ferramentas da API REST da OpLab v3, via transporte SSE, hospedado no Google Cloud Run (região `us-east1`).
 
-Arquivo principal: **`src/index.ts`** (único arquivo de aplicação, ~450 linhas).
+Arquivo principal: **`src/index.ts`**. A matemática/orquestração das ferramentas de
+IV Rank fica em **`src/utils/iv_calculator.ts`** (mantida separada para deixar o
+`index.ts` enxuto e o transporte SSE estável).
 
 ---
 
@@ -23,7 +25,7 @@ OPLAB_ACCESS_TOKEN="token" npm start
 
 # Health check local
 curl http://localhost:8080/health
-# Esperado: {"status":"ok","tools":29}
+# Esperado: {"status":"ok","tools":31,...}
 
 # Build da imagem Docker
 docker build -t oplab-mcp-server .
@@ -149,6 +151,24 @@ O Claude Web/Mobile faz cache da lista de ferramentas. Se a lista for dinâmica 
 
 3. O `TOOLS_LIST` é derivado automaticamente do `TOOL_REGISTRY` — não precisa de nenhuma outra alteração.
 
+**Ferramentas compostas (`handler`):** quando a ferramenta não mapeia 1:1 para um
+GET — porque faz múltiplas chamadas, cálculos ou usa cache (ex: `get_iv_rank_historico`,
+`get_iv_rank_bulk`) — use `handler` em vez de `build`. A lógica fica em
+`src/utils/`, e o `index.ts` só registra a entrada:
+
+```typescript
+{
+  name: "nome_composto",
+  description: "...",
+  properties: { ticker: { type: "string", description: "..." } },
+  required: ["ticker"],
+  handler: (client, a) => minhaFuncao(client, String(a.ticker)),
+},
+```
+
+O `CallToolRequestSchema` usa `handler` se presente; senão, cai no fluxo `build` + GET.
+Cada entrada do `TOOL_REGISTRY` tem **ou** `build` **ou** `handler`, nunca os dois.
+
 **Tipos disponíveis para `properties`:**
 
 | `type` | Tipo TypeScript em `args` | Notas |
@@ -204,7 +224,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 
 | Rota | Método | Descrição |
 |---|---|---|
-| `/health` | GET | Health check. Retorna `{"status":"ok","tools":29}`. Usado pelo Cloud Run. |
+| `/health` | GET | Health check. Retorna `{"status":"ok","tools":31,...}`. Usado pelo Cloud Run. |
 | `/sse` | GET | Abre conexão SSE. Fecha transporte anterior se existir. Retorna stream infinito. |
 | `/messages` | POST | Recebe mensagens JSON-RPC do cliente MCP. Usa `express.text()` + `parsedBody`. |
 
