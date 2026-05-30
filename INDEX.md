@@ -19,11 +19,15 @@ Claude Web/Mobile
                                           ListTools (estático)  CallTool
                                           TOOLS_LIST[]          TOOL_REGISTRY.find()
                                                                       │
-                                                               entry.build(args)
-                                                                      │
-                                                          oplabClient.get(path, params)
-                                                                      │
-                                                         api.oplab.com.br/v3/market/...
+                                                  ┌───────────────────┴───────────────────┐
+                                                  │ tem handler?                           │
+                                            sim ──┤                                        ├── não
+                                                  ▼                                        ▼
+                                    entry.handler(client, args)                     entry.build(args)
+                                  (src/utils/iv_calculator.ts:                             │
+                                   cache 4h + lotes de 3)                     oplabClient.get(path, params)
+                                                  │                                        │
+                                                  └────────────► api.oplab.com.br/v3/market/... ◄────────┘
 ```
 
 ---
@@ -32,8 +36,11 @@ Claude Web/Mobile
 
 | Arquivo / Pasta | Responsabilidade | Mexer quando? |
 |---|---|---|
-| `src/index.ts` | **Todo o servidor** — único arquivo de aplicação | Adicionar ferramenta, corrigir rota, ajustar auth |
+| `src/index.ts` | Servidor + `TOOL_REGISTRY` (rotas SSE, dispatch `build`/`handler`) | Adicionar ferramenta simples, corrigir rota, ajustar auth |
+| `src/utils/iv_calculator.ts` | Matemática de IV Rank, cache 4h, lotes de 3 (ferramentas compostas) | Ajustar cálculo/cache/lote das ferramentas de IV Rank |
 | `Dockerfile` | Build multi-stage node:20-slim | Mudar versão Node, adicionar dep de sistema |
+| `cloudbuild.yaml` | Pipeline build+push+deploy (Cloud Build/trigger) | Mudar passos de CI ou parâmetros de deploy |
+| `deploy.sh` | Deploy completo em um comando (credenciais locais) | Mudar fluxo de deploy manual |
 | `.dockerignore` | Exclusões do contexto Docker | Adicionar pastas geradas |
 | `tsconfig.json` | Configuração TypeScript | Nunca, exceto mudança de target/module |
 | `package.json` | Dependências e scripts | Adicionar/atualizar pacote |
@@ -49,22 +56,35 @@ Claude Web/Mobile
 Leia nesta ordem para entender o arquivo completo:
 
 ```
-Linha ~1    imports
-Linha ~15   createOplabClient()     ← lê OPLAB_ACCESS_TOKEN, cria Axios instance
-Linha ~28   interface PropDef       ← tipo de propriedade do JSON Schema
-Linha ~35   interface ToolDef       ← tipo de entrada do TOOL_REGISTRY
-Linha ~44   TOOL_REGISTRY[]         ← 29 ferramentas de market (NÃO REORDENAR)
-Linha ~360  pick()                  ← helper: filtra undefined de query params
-Linha ~365  TOOLS_LIST              ← derivado de TOOL_REGISTRY, estático, imutável
-Linha ~372  oplabClient             ← singleton Axios
-Linha ~380  server                  ← singleton Server (MCP SDK low-level)
-Linha ~382  setRequestHandler(List) ← retorna TOOLS_LIST verbatim
-Linha ~384  setRequestHandler(Call) ← despacha para entry.build() + axios.get
-Linha ~410  Express app             ← sem middleware global
-Linha ~414  GET /health             ← health check do Cloud Run
-Linha ~418  GET /sse                ← cria SSEServerTransport, server.connect()
-Linha ~425  POST /messages          ← express.text() + handlePostMessage(req,res,body)
-Linha ~432  app.listen()
+imports                  ← inclui getIVRankHistorico/getIVRankBulk de ./utils/iv_calculator.js
+createOplabClient()      ← lê OPLAB_ACCESS_TOKEN, cria Axios instance
+interface PropDef        ← tipo de propriedade do JSON Schema (type, enum, items)
+interface ToolDef        ← entrada do TOOL_REGISTRY: tem build? OU handler?
+TOOL_REGISTRY[]          ← 31 ferramentas: 29 com build, 2 (IV Rank) com handler (NÃO REORDENAR)
+pick()                   ← helper: filtra undefined de query params
+withRetry()              ← retry com backoff só em 5xx
+TOOLS_LIST               ← derivado de TOOL_REGISTRY, estático, imutável
+oplabClient              ← singleton Axios
+server                   ← singleton Server (MCP SDK low-level)
+setRequestHandler(List)  ← retorna TOOLS_LIST verbatim
+setRequestHandler(Call)  ← se entry.handler: handler(client,args); senão build() + axios.get
+GET /health              ← health check do Cloud Run ({"tools":31,...})
+GET /sse                 ← cria SSEServerTransport, server.connect()
+POST /messages           ← express.text() + handlePostMessage(req,res,body)
+app.listen()
+```
+
+### `src/utils/iv_calculator.ts` — blocos internos
+
+```
+calcRetornosLog / calcVolatilidade21d / calcIVRank / calcIVPercentile / classificarIVRank
+                         ← funções matemáticas PURAS (sem I/O, fáceis de testar)
+ivCache (Map) + CACHE_TTL_MS=4h
+                         ← cache em memória por `${ticker}_${periodo}`
+batchWithLimit()         ← concorrência limitada (lotes de 3, 300ms) → evita HTTP 429
+WHITELIST_24             ← lista padrão de tickers do bulk
+getIVRankHistorico()     ← orquestra 1 ticker: histórico + iv_current → resultado
+getIVRankBulk()          ← cache-first, depois lotes, ordena por iv_rank desc
 ```
 
 ---
@@ -80,9 +100,14 @@ Linha ~432  app.listen()
 
 ---
 
-## Onde NÃO existe código (por design)
+## Convenções de código
 
-- **Sem `/src/tools/`** — ferramentas são entradas do array `TOOL_REGISTRY` em `index.ts`
-- **Sem `/src/services/`** — a lógica de chamada HTTP cabe em 3 linhas dentro do handler
-- **Sem testes** — estrutura simples o suficiente para validação manual via `/health`
-- **Sem banco de dados / estado persistente** — servidor stateless (Cloud Run padrão)
+- **Ferramentas simples** (1 GET) → entrada com `build` no `TOOL_REGISTRY` em `index.ts`.
+- **Ferramentas compostas** (múltiplas chamadas, cálculo, cache) → entrada com `handler`,
+  e a lógica vai para `src/utils/` (ex: `iv_calculator.ts`). Mantém o `index.ts` enxuto
+  e o transporte SSE estável.
+- **Sem `/src/services/`** — para ferramentas simples a chamada HTTP cabe no próprio handler.
+- **Cache em memória** — o `ivCache` é por instância. Com `--max-instances>1` cada instância
+  tem o seu cache (aceitável: TTL curto de 4h). Estado persistente continua não existindo.
+- **Testes** — funções de `iv_calculator.ts` são puras e validáveis isoladamente; o restante
+  é validado via `/health` e chamadas reais.

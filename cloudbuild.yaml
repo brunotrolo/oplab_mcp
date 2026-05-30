@@ -1,0 +1,69 @@
+# cloudbuild.yaml — Build + push + deploy do OpLab MCP Server em um único pipeline.
+#
+# Uso manual (um comando):
+#   gcloud builds submit --config cloudbuild.yaml .
+#
+# Ou via trigger (deploy automático a cada push no main) — ver README.md.
+#
+# IMPORTANTE: a service account do Cloud Build precisa de permissão para fazer
+# deploy no Cloud Run. Conceda uma vez (substitua PROJECT_NUMBER):
+#   gcloud projects add-iam-policy-binding PROJECT_ID \
+#     --member="serviceAccount:PROJECT_NUMBER@cloudbuild.gserviceaccount.com" \
+#     --role="roles/run.admin"
+#   gcloud projects add-iam-policy-binding PROJECT_ID \
+#     --member="serviceAccount:PROJECT_NUMBER@cloudbuild.gserviceaccount.com" \
+#     --role="roles/iam.serviceAccountUser"
+#
+# O script deploy.sh (que usa as suas próprias credenciais) NÃO exige esses
+# grants — use-o se preferir não configurar IAM do Cloud Build.
+
+substitutions:
+  _REGION: us-east1
+  _REPO: oplab-mcp
+  _SERVICE: oplab-mcp-server
+
+steps:
+  # 1. Build (multi-stage Dockerfile da raiz) — tag latest + BUILD_ID
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/server:latest
+      - -t
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/server:${BUILD_ID}
+      - .
+
+  # 2. Push de todas as tags
+  - id: push
+    name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - --all-tags
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/server
+
+  # 3. Deploy no Cloud Run com os parâmetros obrigatórios para SSE estável
+  - id: deploy
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - ${_SERVICE}
+      - --image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/server:latest
+      - --region=${_REGION}
+      - --platform=managed
+      - --allow-unauthenticated
+      - --set-secrets=OPLAB_ACCESS_TOKEN=OPLAB_ACCESS_TOKEN:latest
+      - --port=8080
+      - --no-cpu-throttling
+      - --timeout=3600
+      - --min-instances=1
+      - --max-instances=3
+
+images:
+  - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/server:latest
+  - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/server:${BUILD_ID}
+
+options:
+  logging: CLOUD_LOGGING_ONLY
