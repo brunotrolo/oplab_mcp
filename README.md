@@ -1,6 +1,6 @@
 # OpLab MCP Server
 
-Servidor MCP (Model Context Protocol) construído em TypeScript/Node.js sobre Express, com transporte SSE (Server-Sent Events), hospedado no Google Cloud Run. Expõe 29 ferramentas cobrindo toda a seção **Market** da API REST da OpLab v3.
+Servidor MCP (Model Context Protocol) construído em TypeScript/Node.js sobre Express, com transporte SSE (Server-Sent Events), hospedado no Google Cloud Run. Expõe **31 ferramentas**: 29 cobrindo toda a seção **Market** da API REST da OpLab v3, mais 2 ferramentas compostas de **IV Rank** (volatilidade implícita) com cache e processamento em lote.
 
 ---
 
@@ -34,14 +34,19 @@ api.oplab.com.br/v3
 ```
 oplab_mcp/
 ├── src/
-│   └── index.ts          # Único arquivo de aplicação
-├── dist/                 # Saída do tsc (gerada)
-├── Dockerfile            # Multi-stage build (builder + runtime)
+│   ├── index.ts                # Servidor + TOOL_REGISTRY (rotas, SSE, dispatch)
+│   └── utils/
+│       └── iv_calculator.ts    # Matemática de IV Rank + cache + lote (IV tools)
+├── dist/                       # Saída do tsc (gerada)
+├── Dockerfile                  # Multi-stage build (builder + runtime)
+├── cloudbuild.yaml             # Pipeline build+push+deploy (Cloud Build/trigger)
+├── deploy.sh                   # Deploy completo em um comando (credenciais locais)
 ├── .dockerignore
 ├── package.json
 ├── tsconfig.json
-├── CLAUDE.md             # Guia para assistentes de IA
-└── README.md             # Este arquivo
+├── CLAUDE.md                   # Guia para assistentes de IA
+├── INDEX.md                    # Mapa de calor do codebase
+└── README.md                   # Este arquivo
 ```
 
 ### `src/index.ts` — estrutura interna
@@ -49,12 +54,16 @@ oplab_mcp/
 | Bloco | Responsabilidade |
 |---|---|
 | `createOplabClient()` | Cria instância Axios com `Access-Token` header |
-| `interface PropDef / ToolDef` | Tipos do registro de ferramentas |
-| `TOOL_REGISTRY` | Array com os 29 endpoints mapeados |
+| `interface PropDef / ToolDef` | Tipos do registro de ferramentas (campos `build` **ou** `handler`) |
+| `TOOL_REGISTRY` | Array com 31 ferramentas (29 com `build`, 2 com `handler`) |
 | `pick()` | Helper para filtrar parâmetros opcionais undefined |
 | `TOOLS_LIST` | Lista estática derivada de `TOOL_REGISTRY` (retornada no `ListTools`) |
 | `server` (singleton) | `Server` do SDK, handlers registrados uma vez |
+| `CallTool` dispatch | Usa `entry.handler(client, args)` se presente; senão `entry.build()` + GET |
 | Express routes | `/health`, `/sse`, `/messages` |
+
+> A lógica das ferramentas de IV Rank (cálculo, cache de 4h, lotes de 3 com 300ms)
+> vive em `src/utils/iv_calculator.ts` para manter o `index.ts` enxuto e o SSE estável.
 
 ---
 
@@ -108,10 +117,42 @@ Conexões SSE são **long-lived** (persistentes). O Cloud Run tem comportamentos
 | `--min-instances=1` | 1 | Elimina cold-start no handshake. Opcional mas recomendado. |
 | `--max-instances=3` | 3 | Limita custo; cada instância suporta 1 sessão SSE ativa. |
 
-### Comandos de Deploy
+### Deploy em um comando (recomendado)
+
+Use o **`deploy.sh`** da raiz do repo. Ele cria o repositório do Artifact Registry
+se faltar, faz build + push, faz o deploy com todos os parâmetros obrigatórios e
+roda o health check no final:
 
 ```bash
-# 1. Build e push da imagem
+# Projeto ativo do gcloud
+./deploy.sh
+
+# Ou explicitando o projeto
+PROJECT_ID=oplab-mcp-server ./deploy.sh
+```
+
+Variáveis opcionais: `PROJECT_ID`, `REGION` (default `us-east1`), `REPO`
+(default `oplab-mcp`), `SERVICE` (default `oplab-mcp-server`).
+
+### Deploy via Cloud Build (CI / trigger)
+
+O **`cloudbuild.yaml`** faz build + push + deploy num pipeline só:
+
+```bash
+gcloud builds submit --config cloudbuild.yaml .
+```
+
+Para deploy automático a cada push no `main`, crie um trigger apontando para esse
+arquivo. A service account do Cloud Build precisa dos papéis `roles/run.admin` e
+`roles/iam.serviceAccountUser` (instruções no topo do `cloudbuild.yaml`).
+
+### Comandos manuais (referência)
+
+<details>
+<summary>Passo a passo sem o script</summary>
+
+```bash
+# 1. Build e push da imagem (de dentro do repo, onde está o Dockerfile)
 gcloud builds submit \
   --tag us-east1-docker.pkg.dev/SEU_PROJECT_ID/oplab-mcp/server:latest \
   --project=SEU_PROJECT_ID
@@ -132,8 +173,10 @@ gcloud run deploy oplab-mcp-server \
 
 # 3. Verificar deploy
 curl https://SUA_URL.run.app/health
-# Resposta esperada: {"status":"ok","tools":29}
+# Resposta esperada: {"status":"ok","tools":31,"api":"reachable"}
 ```
+
+</details>
 
 ---
 
@@ -230,7 +273,9 @@ app.get("/sse", async (_req, res) => {
 
 ---
 
-## As 29 Ferramentas de Market
+## As 31 Ferramentas
+
+### 29 Ferramentas de Market (mapeiam 1:1 para um GET via `build`)
 
 | Grupo | Ferramenta | Endpoint |
 |---|---|---|
@@ -264,6 +309,43 @@ app.get("/sse", async (_req, res) => {
 | Bolsas | `get_exchanges` | `GET /market/exchanges` |
 | | `get_exchange` | `GET /market/exchanges/{uid}` |
 
+### 2 Ferramentas Compostas de IV Rank (usam `handler` em `src/utils/iv_calculator.ts`)
+
+| Ferramenta | O que faz | Endpoints OpLab usados internamente |
+|---|---|---|
+| `get_iv_rank_historico` | IV Rank + IV Percentile de **um** ativo, com classificação operacional e histórico mensal | `GET /market/historical/{ticker}/1d` + `GET /market/stocks/{ticker}` |
+| `get_iv_rank_bulk` | IV Rank de **vários** ativos (whitelist padrão de 24), ranqueados por IV Rank decrescente + resumo | os dois acima, por ticker, em lotes |
+
+#### Como o IV Rank é calculado
+
+1. **Série de volatilidade realizada:** busca o histórico diário (`/market/historical`),
+   calcula retornos logarítmicos e a volatilidade rolling de 21 dias anualizada
+   (`std × √252 × 100`) ao longo da janela (`periodo`: 21, 63, 126 ou 252 dias úteis).
+2. **IV atual:** lê `iv_current` de `/market/stocks/{ticker}` (`iv_fonte: "implicita"`).
+   A chain `/market/options/{ticker}` **não** expõe IV e tem ~4MB por ativo, então não é
+   usada aqui. Sem `iv_current`, cai para a vol. realizada de 21d mais recente
+   (`iv_fonte: "historica"`).
+3. **IV Rank** = `(iv_atual − min) / (max − min) × 100` (limitado a 0–100).
+   **IV Percentile** = % de dias da série com vol < iv_atual.
+4. **Classificação:** `≥70` MUITO_ALTA · `50–69` ALTA · `30–49` MEDIA · `<30` BAIXA.
+
+#### Cache e rate limit
+
+- **Cache em memória (TTL 4h)** por `ticker_periodo`. Tickers em cache não consomem
+  chamadas à API; a 2ª chamada retorna `cache_hit: true` instantaneamente.
+- **Concorrência limitada:** o bulk processa os tickers sem cache em **lotes de 3 com
+  300ms entre lotes** (`batchWithLimit`), evitando HTTP 429 da OpLab.
+
+#### Exemplo de uso (Protocolo 2 — triagem de venda de opções)
+
+```
+get_iv_rank_bulk()        → mantém classificacao ALTA ou MUITO_ALTA (descarta iv_rank < 30)
+get_tendencia_m9m21()     → mantém tendência de alta
+get_maiores_volumes()     → confirma liquidez (volume PUT > R$5M)
+get_screener_quantitativo() → Nota Quantamental + Delta
+get_options_bs()          → Delta Black-Scholes de confirmação
+```
+
 ---
 
 ## Desenvolvimento Local
@@ -280,4 +362,5 @@ OPLAB_ACCESS_TOKEN="seu_token" npm start
 
 # Testar health check
 curl http://localhost:8080/health
+# Resposta esperada: {"status":"ok","tools":31,"api":"reachable"}
 ```

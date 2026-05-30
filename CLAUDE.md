@@ -30,7 +30,13 @@ curl http://localhost:8080/health
 # Build da imagem Docker
 docker build -t oplab-mcp-server .
 
-# Deploy no Cloud Run (substitua as variáveis)
+# Deploy completo em UM comando (cria repo se faltar, build, deploy, health check)
+PROJECT_ID=oplab-mcp-server ./deploy.sh
+
+# Alternativa CI: build + push + deploy num pipeline só
+gcloud builds submit --config cloudbuild.yaml .
+
+# Deploy manual (substitua as variáveis) — referência
 gcloud builds submit \
   --tag us-east1-docker.pkg.dev/PROJECT/oplab-mcp/server:latest
 
