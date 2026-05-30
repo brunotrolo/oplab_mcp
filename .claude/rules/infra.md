@@ -82,4 +82,4 @@ FROM node:20-slim AS runtime
 O Cloud Run usa `GET /health` para verificar se a instância está viva.
 Esta rota **não pode ser removida** do `src/index.ts`.
 
-Resposta esperada: `{"status":"ok","tools":31,...}`
+Resposta esperada: `{"status":"ok","tools":32,...}`

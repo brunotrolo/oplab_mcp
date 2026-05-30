@@ -1,6 +1,6 @@
 # OpLab MCP Server
 
-Servidor MCP (Model Context Protocol) construído em TypeScript/Node.js sobre Express, com transporte SSE (Server-Sent Events), hospedado no Google Cloud Run. Expõe **31 ferramentas**: 29 cobrindo toda a seção **Market** da API REST da OpLab v3, mais 2 ferramentas compostas de **IV Rank** (volatilidade implícita) com cache e processamento em lote.
+Servidor MCP (Model Context Protocol) construído em TypeScript/Node.js sobre Express, com transporte SSE (Server-Sent Events), hospedado no Google Cloud Run. Expõe **32 ferramentas**: 29 cobrindo toda a seção **Market** da API REST da OpLab v3, 2 ferramentas compostas de **IV Rank** (volatilidade implícita) e 1 de **backtesting** do Protocolo 2 — todas com cache e processamento em lote.
 
 ---
 
@@ -55,7 +55,7 @@ oplab_mcp/
 |---|---|
 | `createOplabClient()` | Cria instância Axios com `Access-Token` header |
 | `interface PropDef / ToolDef` | Tipos do registro de ferramentas (campos `build` **ou** `handler`) |
-| `TOOL_REGISTRY` | Array com 31 ferramentas (29 com `build`, 2 com `handler`) |
+| `TOOL_REGISTRY` | Array com 32 ferramentas (29 com `build`, 3 com `handler`) |
 | `pick()` | Helper para filtrar parâmetros opcionais undefined |
 | `TOOLS_LIST` | Lista estática derivada de `TOOL_REGISTRY` (retornada no `ListTools`) |
 | `server` (singleton) | `Server` do SDK, handlers registrados uma vez |
@@ -173,7 +173,7 @@ gcloud run deploy oplab-mcp-server \
 
 # 3. Verificar deploy
 curl https://SUA_URL.run.app/health
-# Resposta esperada: {"status":"ok","tools":31,"api":"reachable"}
+# Resposta esperada: {"status":"ok","tools":32,"api":"reachable"}
 ```
 
 </details>
@@ -366,6 +366,31 @@ get_screener_quantitativo() → Nota Quantamental + Delta
 get_options_bs()          → Delta Black-Scholes de confirmação
 ```
 
+### Ferramenta de Backtesting (`handler` em `src/utils/backtest_engine.ts`)
+
+| Ferramenta | O que faz |
+|---|---|
+| `get_backtest_protocolo2` | **Analítica — apenas simula, não executa ordens.** Backtesting histórico do Protocolo 2 (venda de PUTs OTM) |
+
+Para cada ativo, em cada dia útil do período, a engine:
+
+1. **Filtros de entrada** — IV Rank do dia `≥ iv_rank_min` (vol. realizada de 21d ranqueada); tendência `M9/M21 ≥ 1.0` (se `m9m21_filter`). O filtro de volume de PUT é marcado como `volume_nao_verificado` (não há volume de opções no histórico da OpLab).
+2. **Seleção da PUT** — em `/market/historical/options/{ticker}/{date}/{date}`, filtra PUTs com `delta ∈ [delta_min, delta_max]`, `DTE ∈ [dte_min, dte_max]` e `premium > 0`; escolhe a de delta mais próximo do centro do range (desempate por maior prêmio).
+3. **Simulação no vencimento** — `WIN` se `spot > strike` (captura 100% do prêmio); `LOSS` caso contrário (`(premium − (strike − spot)) × 100`). Margem = `strike × 100 × 0.22`.
+4. **Anti-sobreposição** — não abre nova operação no mesmo ativo enquanto há uma pendente.
+
+O retorno traz `resumo_geral`, **`comparativo_filtros`** (com/sem cada filtro — prova estatística do valor do protocolo, sempre calculado), `por_ativo`, `por_mes`, `curva_capital` e `alertas`.
+
+- **Cache de 24h** por combinação de parâmetros (backtest histórico não muda).
+- **Lotes de 3 ativos com 500ms** entre lotes (mais conservador que o IV Rank, pois o volume de dados é maior); timeout de 10s por ativo; período máximo de 2 anos.
+
+```bash
+# Backtest de 1 ativo, 3 meses
+get_backtest_protocolo2(tickers=["VALE3"], data_inicio="2025-01-01", data_fim="2025-03-31")
+# Backtest completo (24 ativos, 2 anos) — sem parâmetros
+get_backtest_protocolo2()
+```
+
 ---
 
 ## Desenvolvimento Local
@@ -382,5 +407,5 @@ OPLAB_ACCESS_TOKEN="seu_token" npm start
 
 # Testar health check
 curl http://localhost:8080/health
-# Resposta esperada: {"status":"ok","tools":31,"api":"reachable"}
+# Resposta esperada: {"status":"ok","tools":32,"api":"reachable"}
 ```

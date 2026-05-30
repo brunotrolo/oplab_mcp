@@ -4,6 +4,7 @@ import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import axios, { AxiosInstance } from "axios";
 import { getIVRankHistorico, getIVRankBulk, normalizarPeriodo } from "./utils/iv_calculator.js";
+import { getBacktestProtocolo2 } from "./utils/backtest_engine.js";
 
 // ---------------------------------------------------------------------------
 // OpLab API client
@@ -381,6 +382,26 @@ const TOOL_REGISTRY: ToolDef[] = [
     },
     required: [],
     handler: (client, a) => getIVRankBulk(client, a.tickers as string[] | undefined, normalizarPeriodo(a.periodo)),
+  },
+
+  // ── Backtesting — Protocolo 2 (venda de PUTs OTM) ───────────────────────────
+  {
+    name: "get_backtest_protocolo2",
+    description:
+      "Ferramenta ANALÍTICA (apenas simula — não executa ordens reais). Faz backtesting histórico do Protocolo 2 (venda de PUTs OTM) sobre dados da OpLab: para cada dia útil aplica os filtros IV Rank, tendência M9/M21 e seleciona a PUT candidata (delta e DTE no range), simulando o resultado no vencimento. Retorna resumo geral, comparativo de filtros (prova estatística do valor do protocolo), desempenho por ativo, por mês e curva de capital. Sem 'tickers', usa a whitelist padrão de 24 ativos. Cache de 24h; lotes de 3 ativos com 500ms entre lotes; período máximo de 2 anos.",
+    properties: {
+      tickers:      { type: "array",   description: "Lista de códigos (ex: [\"VALE3\",\"PETR4\"]). Se omitido, usa a whitelist padrão de 24 ativos.", items: { type: "string" } },
+      data_inicio:  { type: "string",  description: "Data inicial YYYY-MM-DD. Padrão: 2 anos atrás." },
+      data_fim:     { type: "string",  description: "Data final YYYY-MM-DD. Padrão: hoje." },
+      delta_min:    { type: "number",  description: "Delta mínimo (mais negativo) da PUT. Padrão: -0.30" },
+      delta_max:    { type: "number",  description: "Delta máximo (menos negativo) da PUT. Padrão: -0.15" },
+      dte_min:      { type: "integer", description: "Dias até o vencimento mínimo. Padrão: 15" },
+      dte_max:      { type: "integer", description: "Dias até o vencimento máximo. Padrão: 30" },
+      iv_rank_min:  { type: "integer", description: "IV Rank mínimo no dia da entrada. Padrão: 50" },
+      m9m21_filter: { type: "boolean", description: "Se true, exige tendência de alta (M9/M21 >= 1.0). Padrão: true" },
+    },
+    required: [],
+    handler: (client, a) => getBacktestProtocolo2(client, a),
   },
 ];
 
