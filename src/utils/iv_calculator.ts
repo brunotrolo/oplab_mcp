@@ -111,6 +111,37 @@ function toPercent(iv: number): number {
   return iv < 3 ? iv * 100 : iv;
 }
 
+/** Formata número em escala % com 1 casa e vírgula decimal (pt-BR): 71.5 → "71,5". */
+function fmtComma(n: number): string {
+  return round1(n).toFixed(1).replace(".", ",");
+}
+
+export interface ConsensoInfo {
+  consenso: string;
+  consenso_sinal: string;
+  consenso_confianca: string;
+}
+
+/**
+ * Consenso entre as janelas de 63d e 126d (as duas mais relevantes operacionalmente).
+ * Confirma o sinal quando AMBAS cruzam o mesmo limiar; caso contrário, DIVERGENTE.
+ */
+export function calcConsenso(r63: number, r126: number): ConsensoInfo {
+  if (r63 >= 70 && r126 >= 70)
+    return { consenso: "MUITO_ALTA", consenso_sinal: "EXCELENTE — Sinal confirmado em múltiplos períodos", consenso_confianca: "ALTA" };
+  if (r63 >= 50 && r126 >= 50)
+    return { consenso: "ALTA", consenso_sinal: "BOM — Sinal confirmado em múltiplos períodos", consenso_confianca: "ALTA" };
+  if (r63 >= 30 && r126 >= 30)
+    return { consenso: "MEDIA", consenso_sinal: "NEUTRO — Avaliar outros filtros", consenso_confianca: "MEDIA" };
+  if (r63 < 30 && r126 < 30)
+    return { consenso: "BAIXA", consenso_sinal: "EVITAR — IV baixa confirmada", consenso_confianca: "ALTA" };
+  return {
+    consenso: "DIVERGENTE",
+    consenso_sinal: "INCONCLUSIVO — Períodos divergem. Usar iv_rank_63d como referência para operações de curto prazo.",
+    consenso_confianca: "BAIXA",
+  };
+}
+
 // ── Cache em memória (TTL 4h) ───────────────────────────────────────────────
 
 const CACHE_TTL_MS = 4 * 60 * 60 * 1000; // 4 horas
@@ -153,6 +184,13 @@ export interface HistoricoMensal {
   iv_max: number;
 }
 
+export interface MultiPeriodo {
+  iv_rank_21d: number;
+  iv_rank_63d: number;
+  iv_rank_126d: number;
+  iv_rank_252d: number;
+}
+
 export interface IVRankResult {
   ticker: string;
   periodo_dias: number;
@@ -166,9 +204,24 @@ export interface IVRankResult {
   iv_percentile: number;
   classificacao: string;
   sinal_operacional: string;
+  // Ajuste 1 — alerta de histórico insuficiente
+  historico_insuficiente: boolean;
+  dias_disponiveis: number;
+  aviso?: string;
+  // Ajuste 2 — multi-período e consenso
+  multi_periodo: MultiPeriodo;
+  consenso: string;
+  consenso_sinal: string;
+  consenso_confianca: string;
+  // Ajuste 3 — detecção de evento corporativo
+  alerta_evento: boolean;
+  alerta_evento_msg?: string;
   cache_hit: boolean;
   historico_mensal: HistoricoMensal[];
 }
+
+/** Mínimo de dias úteis para o IV Rank ser considerado confiável. */
+const MIN_DIAS_CONFIAVEL = 126;
 
 /** Whitelist padrão de 24 ativos líquidos para o bulk. */
 export const WHITELIST_24 = [
@@ -256,9 +309,54 @@ export async function getIVRankHistorico(
     // mantém fallback histórico
   }
 
+  // Dias úteis de dados (candles) disponíveis — base para os alertas de histórico curto.
+  const diasDisponiveis = candles.length;
+
+  const ivMedia = round1(mean(serie));
   const ivRank = clamp(calcIVRank(ivAtual, serie), 0, 100);
   const ivPercentile = clamp(calcIVPercentile(ivAtual, serie), 0, 100);
-  const { nivel, sinal } = classificarIVRank(ivRank);
+  let { nivel, sinal } = classificarIVRank(ivRank);
+
+  // Ajuste 2 — multi-período: IV Rank nas 4 janelas, reaproveitando volAll (sem nova chamada).
+  const rankFor = (n: number) => round1(clamp(calcIVRank(ivAtual, volAll.slice(-n)), 0, 100));
+  const multi_periodo: MultiPeriodo = {
+    iv_rank_21d: rankFor(21),
+    iv_rank_63d: rankFor(63),
+    iv_rank_126d: rankFor(126),
+    iv_rank_252d: rankFor(252),
+  };
+  const { consenso, consenso_sinal, consenso_confianca } = calcConsenso(
+    multi_periodo.iv_rank_63d,
+    multi_periodo.iv_rank_126d
+  );
+
+  // Ajuste 3 — evento corporativo: IV atual mais que 2× a média histórica do período.
+  let alerta_evento = false;
+  let alerta_evento_msg: string | undefined;
+  if (ivMedia > 0 && ivAtual > ivMedia * 2.0) {
+    alerta_evento = true;
+    alerta_evento_msg =
+      `IV atual (${fmtComma(ivAtual)}%) é mais que 2× a média histórica (${fmtComma(ivMedia)}%). ` +
+      `Possível evento corporativo ou distorção de dados. Verificar notícias antes de operar.`;
+    // classificacao mantém o calculado; só o sinal operacional muda.
+    sinal = "⚠️ VERIFICAR EVENTO — IV anormalmente alta. Confirmar antes de operar.";
+  }
+
+  // Ajuste 1 — histórico insuficiente: tem prioridade sobre os demais sinais.
+  let historico_insuficiente = false;
+  let aviso: string | undefined;
+  if (diasDisponiveis < MIN_DIAS_CONFIAVEL) {
+    historico_insuficiente = true;
+    aviso =
+      "Histórico < 126 dias úteis — IV Rank pode estar distorcido. " +
+      "Usar com cautela ou aguardar mais dados históricos.";
+    nivel = "INSUFICIENTE";
+    sinal = "DADOS INSUFICIENTES — Verificar manualmente";
+  } else if (diasDisponiveis < periodo) {
+    aviso =
+      `Período solicitado: ${periodo} dias. Disponível: ${diasDisponiveis} dias. ` +
+      `IV Rank calculado com dados parciais.`;
+  }
 
   // Histórico mensal: média e máximo da vol_21d por mês.
   const byMonth = new Map<string, number[]>();
@@ -280,11 +378,20 @@ export async function getIVRankHistorico(
     iv_fonte: ivFonte,
     iv_min_periodo: round1(Math.min(...serie)),
     iv_max_periodo: round1(Math.max(...serie)),
-    iv_media_periodo: round1(mean(serie)),
+    iv_media_periodo: ivMedia,
     iv_rank: round1(ivRank),
     iv_percentile: round1(ivPercentile),
     classificacao: nivel,
     sinal_operacional: sinal,
+    historico_insuficiente,
+    dias_disponiveis: diasDisponiveis,
+    ...(aviso ? { aviso } : {}),
+    multi_periodo,
+    consenso,
+    consenso_sinal,
+    consenso_confianca,
+    alerta_evento,
+    ...(alerta_evento_msg ? { alerta_evento_msg } : {}),
     cache_hit: false,
     historico_mensal,
   };
@@ -310,6 +417,17 @@ export interface IVRankBulkResult {
     sinal_operacional: string;
     cache_hit: boolean;
   }>;
+  triagem: {
+    prontos_para_operar: Array<{
+      ticker: string;
+      iv_rank_63d: number;
+      consenso: string;
+      consenso_confianca: string;
+      alerta_evento: boolean;
+    }>;
+    verificar_antes: Array<{ ticker: string; motivo: string }>;
+    descartar: Array<{ ticker: string; motivo: string }>;
+  };
   erros?: Array<{ ticker: string; erro: string }>;
 }
 
@@ -379,6 +497,31 @@ export async function getIVRankBulk(
     cache_hit: r.cache_hit,
   }));
 
+  // Ajuste 4 — triagem automática por consenso/alertas.
+  const triagem: IVRankBulkResult["triagem"] = {
+    prontos_para_operar: [],
+    verificar_antes: [],
+    descartar: [],
+  };
+  for (const r of results) {
+    if (r.historico_insuficiente) {
+      triagem.descartar.push({ ticker: r.ticker, motivo: `INSUFICIENTE — apenas ${r.dias_disponiveis} dias úteis` });
+    } else if (r.consenso_confianca === "BAIXA" || r.alerta_evento) {
+      const motivo = r.alerta_evento
+        ? "ALERTA_EVENTO — IV 2x acima da média"
+        : `DIVERGENTE — 252d=${round1(r.multi_periodo.iv_rank_252d)}% vs 63d=${round1(r.multi_periodo.iv_rank_63d)}%`;
+      triagem.verificar_antes.push({ ticker: r.ticker, motivo });
+    } else if (r.consenso_confianca === "ALTA" && (r.consenso === "MUITO_ALTA" || r.consenso === "ALTA")) {
+      triagem.prontos_para_operar.push({
+        ticker: r.ticker,
+        iv_rank_63d: r.multi_periodo.iv_rank_63d,
+        consenso: r.consenso,
+        consenso_confianca: r.consenso_confianca,
+        alerta_evento: r.alerta_evento,
+      });
+    }
+  }
+
   return {
     periodo_dias: periodo,
     data_referencia: results[0]?.data_referencia ?? new Date().toISOString().slice(0, 10),
@@ -388,6 +531,7 @@ export async function getIVRankBulk(
     tempo_execucao_ms: Date.now() - start,
     resumo,
     ranking,
+    triagem,
     ...(errors.length ? { erros: errors } : {}),
   };
 }

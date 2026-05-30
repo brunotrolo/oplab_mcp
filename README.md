@@ -329,6 +329,26 @@ app.get("/sse", async (_req, res) => {
    **IV Percentile** = % de dias da série com vol < iv_atual.
 4. **Classificação:** `≥70` MUITO_ALTA · `50–69` ALTA · `30–49` MEDIA · `<30` BAIXA.
 
+#### Qualidade do sinal (campos adicionais)
+
+Além do IV Rank do período solicitado, `get_iv_rank_historico` retorna:
+
+- **`historico_insuficiente` / `dias_disponiveis` / `aviso`** — ativos com `< 126`
+  dias úteis têm `classificacao: "INSUFICIENTE"` (o `iv_min` dos primeiros pregões
+  distorce o rank). Entre 126 e o período pedido, calcula com dados parciais e avisa.
+- **`multi_periodo`** — IV Rank nas 4 janelas (21/63/126/252d) calculado de uma vez,
+  sem chamadas extras (reaproveita o histórico já baixado).
+- **`consenso` / `consenso_sinal` / `consenso_confianca`** — confirmação cruzando
+  63d e 126d. Quando as duas janelas concordam, confiança `ALTA`; quando divergem,
+  `DIVERGENTE` com confiança `BAIXA`. É informação **adicional** — `classificacao` e
+  `sinal_operacional` continuam baseados no período solicitado.
+- **`alerta_evento` / `alerta_evento_msg`** — quando `iv_atual > 2× iv_media_periodo`
+  (possível evento corporativo); o `sinal_operacional` vira `⚠️ VERIFICAR EVENTO`.
+
+No `get_iv_rank_bulk`, o campo **`triagem`** classifica os ativos em três listas:
+`prontos_para_operar` (consenso ALTA/MUITO_ALTA, confiança ALTA, sem alertas),
+`verificar_antes` (divergente ou alerta de evento) e `descartar` (histórico insuficiente).
+
 #### Cache e rate limit
 
 - **Cache em memória (TTL 4h)** por `ticker_periodo`. Tickers em cache não consomem
