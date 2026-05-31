@@ -282,7 +282,11 @@ app.get("/sse", async (_req, res) => {
 
 ---
 
-## As 31 Ferramentas
+## As 33 Ferramentas
+
+> 📖 **Catálogo completo, com parâmetros e exemplos de cada ferramenta:
+> [FERRAMENTAS.md](FERRAMENTAS.md).** Histórico do que foi desenvolvido:
+> [CHANGELOG.md](CHANGELOG.md). Abaixo, a referência por endpoint.
 
 ### 29 Ferramentas de Market (mapeiam 1:1 para um GET via `build`)
 
