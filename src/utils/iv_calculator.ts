@@ -220,7 +220,12 @@ export interface IVRankResult {
   historico_mensal: HistoricoMensal[];
 }
 
-/** Mínimo de dias úteis para o IV Rank ser considerado confiável. */
+/**
+ * Mínimo de dias úteis para o IV Rank ser considerado confiável.
+ * Teto absoluto de 126 — mas a suficiência é sempre avaliada em relação ao
+ * período solicitado (ver `getIVRankHistorico`): nunca exigir mais dados do que
+ * a janela pedida precisa. Ex.: para `periodo=63`, ~80 candles já bastam.
+ */
 const MIN_DIAS_CONFIAVEL = 126;
 
 /** Whitelist padrão de 24 ativos líquidos para o bulk. */
@@ -342,20 +347,27 @@ export async function getIVRankHistorico(
     sinal = "⚠️ VERIFICAR EVENTO — IV anormalmente alta. Confirmar antes de operar.";
   }
 
-  // Ajuste 1 — histórico insuficiente: tem prioridade sobre os demais sinais.
+  // Ajuste 1 — histórico insuficiente: avaliado SEMPRE em relação ao período
+  // solicitado, nunca contra um limiar fixo. `serie` são os valores de vol_21d
+  // dentro da janela pedida; precisamos de uma fração razoável dela para um rank
+  // confiável. O teto de 126 só se aplica quando o período pedido é maior que isso.
+  // (Correção do bug em que `periodo=63` com ~102 candles era marcado INSUFICIENTE.)
+  const minNecessario = Math.min(periodo, MIN_DIAS_CONFIAVEL);
+  const valoresNaJanela = serie.length; // nº de vol_21d efetivamente na janela
   let historico_insuficiente = false;
   let aviso: string | undefined;
-  if (diasDisponiveis < MIN_DIAS_CONFIAVEL) {
+  if (valoresNaJanela < Math.ceil(minNecessario * 0.5)) {
+    // Menos da metade dos pontos que a janela pedida requer → rank não confiável.
     historico_insuficiente = true;
     aviso =
-      "Histórico < 126 dias úteis — IV Rank pode estar distorcido. " +
-      "Usar com cautela ou aguardar mais dados históricos.";
+      `Histórico insuficiente para a janela de ${periodo} dias — apenas ${valoresNaJanela} ` +
+      `valores de volatilidade disponíveis. IV Rank pode estar distorcido; usar com cautela.`;
     nivel = "INSUFICIENTE";
     sinal = "DADOS INSUFICIENTES — Verificar manualmente";
-  } else if (diasDisponiveis < periodo) {
+  } else if (valoresNaJanela < minNecessario) {
     aviso =
-      `Período solicitado: ${periodo} dias. Disponível: ${diasDisponiveis} dias. ` +
-      `IV Rank calculado com dados parciais.`;
+      `Período solicitado: ${periodo} dias. Disponível: ${valoresNaJanela} valores de ` +
+      `volatilidade. IV Rank calculado com dados parciais.`;
   }
 
   // Histórico mensal: média e máximo da vol_21d por mês.
