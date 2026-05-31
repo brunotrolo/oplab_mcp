@@ -1,6 +1,6 @@
 # OpLab MCP Server
 
-Servidor MCP (Model Context Protocol) construído em TypeScript/Node.js sobre Express, com transporte SSE (Server-Sent Events), hospedado no Google Cloud Run. Expõe **32 ferramentas**: 29 cobrindo toda a seção **Market** da API REST da OpLab v3, 2 ferramentas compostas de **IV Rank** (volatilidade implícita) e 1 de **backtesting** do Protocolo 2 — todas com cache e processamento em lote.
+Servidor MCP (Model Context Protocol) construído em TypeScript/Node.js sobre Express, com transporte SSE (Server-Sent Events), hospedado no Google Cloud Run. Expõe **33 ferramentas**: 29 cobrindo toda a seção **Market** da API REST da OpLab v3, 2 ferramentas compostas de **IV Rank** (volatilidade implícita), 1 de **backtesting** do Protocolo 2 e 1 de **plano mensal de travas** Bull Put Spread — todas com cache e processamento em lote.
 
 ---
 
@@ -55,7 +55,7 @@ oplab_mcp/
 |---|---|
 | `createOplabClient()` | Cria instância Axios com `Access-Token` header |
 | `interface PropDef / ToolDef` | Tipos do registro de ferramentas (campos `build` **ou** `handler`) |
-| `TOOL_REGISTRY` | Array com 32 ferramentas (29 com `build`, 3 com `handler`) |
+| `TOOL_REGISTRY` | Array com 33 ferramentas (29 com `build`, 4 com `handler`) |
 | `pick()` | Helper para filtrar parâmetros opcionais undefined |
 | `TOOLS_LIST` | Lista estática derivada de `TOOL_REGISTRY` (retornada no `ListTools`) |
 | `server` (singleton) | `Server` do SDK, handlers registrados uma vez |
@@ -173,7 +173,7 @@ gcloud run deploy oplab-mcp-server \
 
 # 3. Verificar deploy
 curl https://SUA_URL.run.app/health
-# Resposta esperada: {"status":"ok","tools":32,"api":"reachable"}
+# Resposta esperada: {"status":"ok","tools":33,"api":"reachable"}
 ```
 
 </details>
@@ -395,6 +395,28 @@ get_backtest_protocolo2(tickers=["VALE3"], use_spread=true, spread_width=3.00)
 get_backtest_protocolo2()
 ```
 
+### Plano mensal de travas (`handler` em `src/utils/opportunity_engine.ts`)
+
+| Ferramenta | O que faz |
+|---|---|
+| `get_oportunidades_mensais` | **Analítica — apenas sugere, não envia ordens.** Monta um plano de travas Bull Put Spread para atingir a meta de prêmio do mês dentro da margem |
+
+Fluxo (lotes de 3 ativos, 300ms entre lotes):
+
+1. **Filtros de qualidade** — IV Rank ≥ 50 (`get_iv_rank_historico`, 63d), tendência **M9/M21 ≥ 1.0** (`get_stock`), volume de PUT ≥ R$5M (`get_highest_options_volume`).
+2. **Seleção da trava** — na cadeia ao vivo (`get_instrument_series?bs=true`, com `delta`/`bid`/`ask` reais): vende a PUT de maior bid no range de `delta`/`dte`, compra a proteção do mesmo vencimento em strike ≈ `vendido − spread_width`. Prêmio líquido = `bid_venda − ask_compra`.
+3. **Dimensionamento** — distribui lotes para a `meta_mensal` sem ultrapassar `margem_max_pct × capital`, com concentração máx. de 35% por ativo.
+
+Regras de negócio: nunca `M9/M21 < 1.0`, nunca `delta < -0.30`, descarta prêmio líquido `< R$0,40`. Se nada passa, retorna plano vazio com explicação clara.
+
+```bash
+get_oportunidades_mensais(capital=130000)                          # meta padrão R$4.000
+get_oportunidades_mensais(capital=130000, meta_mensal=6000)
+get_oportunidades_mensais(capital=130000, spread_width=5.0)
+```
+
+> ⚠️ Em mercados de baixa liquidez nas pontas, a perna de proteção pode ter `ask` muito largo, tornando o prêmio líquido negativo — a ferramenta então (corretamente) não sugere a trava. Plano vazio é resposta legítima, não erro.
+
 ---
 
 ## Desenvolvimento Local
@@ -411,5 +433,5 @@ OPLAB_ACCESS_TOKEN="seu_token" npm start
 
 # Testar health check
 curl http://localhost:8080/health
-# Resposta esperada: {"status":"ok","tools":32,"api":"reachable"}
+# Resposta esperada: {"status":"ok","tools":33,"api":"reachable"}
 ```

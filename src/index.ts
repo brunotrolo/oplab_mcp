@@ -5,6 +5,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 import axios, { AxiosInstance } from "axios";
 import { getIVRankHistorico, getIVRankBulk, normalizarPeriodo } from "./utils/iv_calculator.js";
 import { getBacktestProtocolo2 } from "./utils/backtest_engine.js";
+import { getOportunidadesMensais } from "./utils/opportunity_engine.js";
 
 // ---------------------------------------------------------------------------
 // OpLab API client
@@ -404,6 +405,26 @@ const TOOL_REGISTRY: ToolDef[] = [
     },
     required: [],
     handler: (client, a) => getBacktestProtocolo2(client, a),
+  },
+
+  // ── Plano mensal de travas Bull Put Spread ──────────────────────────────────
+  {
+    name: "get_oportunidades_mensais",
+    description:
+      "Ferramenta ANALÍTICA (apenas sugere um plano — não envia ordens). Monta um plano mensal de travas Bull Put Spread que, combinadas, buscam atingir a meta de prêmio líquido do mês respeitando capital e margem disponíveis. Aplica filtros de qualidade (IV Rank >= 50, tendência M9/M21 >= 1.0, volume de PUT >= R$5M), seleciona a trava real da cadeia ao vivo (delta/bid/ask reais) e dimensiona os lotes. Retorna viabilidade, plano de execução com instruções por trava, resumo financeiro e alertas. Sem 'tickers', usa 12 ativos pré-selecionados.",
+    properties: {
+      capital:        { type: "number",  description: "Capital total disponível em R$ (ex: 130000). OBRIGATÓRIO." },
+      meta_mensal:    { type: "number",  description: "Prêmio líquido alvo no mês em R$. Padrão: 4000" },
+      margem_max_pct: { type: "number",  description: "Fração máxima do capital alocada em margem (0-1). Padrão: 0.35" },
+      spread_width:   { type: "number",  description: "Distância em R$ entre o strike vendido e o comprado. Padrão: 3.0" },
+      delta_min:      { type: "number",  description: "Delta mais negativo aceito na PUT vendida. Padrão: -0.25 (nunca abaixo de -0.30)" },
+      delta_max:      { type: "number",  description: "Delta menos negativo aceito na PUT vendida. Padrão: -0.15" },
+      dte_min:        { type: "integer", description: "Dias até o vencimento mínimo. Padrão: 15" },
+      dte_max:        { type: "integer", description: "Dias até o vencimento máximo. Padrão: 30" },
+      tickers:        { type: "array",   description: "Lista de ativos a avaliar. Se omitido, usa 12 ativos pré-selecionados.", items: { type: "string" } },
+    },
+    required: ["capital"],
+    handler: (client, a) => getOportunidadesMensais(client, a),
   },
 ];
 
