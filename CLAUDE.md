@@ -6,11 +6,12 @@ Este arquivo descreve a arquitetura, padrões e regras de manutenção do **OpLa
 
 ## Contexto do Projeto
 
-Servidor MCP (Model Context Protocol) em TypeScript/Express que expõe 32 ferramentas da API REST da OpLab v3, via transporte SSE, hospedado no Google Cloud Run (região `us-east1`).
+Servidor MCP (Model Context Protocol) em TypeScript/Express que expõe 33 ferramentas da API REST da OpLab v3, via transporte SSE, hospedado no Google Cloud Run (região `us-east1`).
 
 Arquivo principal: **`src/index.ts`**. A matemática/orquestração das ferramentas de
-IV Rank fica em **`src/utils/iv_calculator.ts`** e o backtesting do Protocolo 2 em
-**`src/utils/backtest_engine.ts`** (mantidos separados para deixar o `index.ts`
+IV Rank fica em **`src/utils/iv_calculator.ts`**, o backtesting do Protocolo 2 em
+**`src/utils/backtest_engine.ts`** e o montador de plano mensal de travas em
+**`src/utils/opportunity_engine.ts`** (mantidos separados para deixar o `index.ts`
 enxuto e o transporte SSE estável).
 
 ---
@@ -26,7 +27,7 @@ OPLAB_ACCESS_TOKEN="token" npm start
 
 # Health check local
 curl http://localhost:8080/health
-# Esperado: {"status":"ok","tools":32,...}
+# Esperado: {"status":"ok","tools":33,...}
 
 # Build da imagem Docker
 docker build -t oplab-mcp-server .
@@ -160,8 +161,8 @@ O Claude Web/Mobile faz cache da lista de ferramentas. Se a lista for dinâmica 
 
 **Ferramentas compostas (`handler`):** quando a ferramenta não mapeia 1:1 para um
 GET — porque faz múltiplas chamadas, cálculos ou usa cache (ex: `get_iv_rank_historico`,
-`get_iv_rank_bulk`, `get_backtest_protocolo2`) — use `handler` em vez de `build`. A
-lógica fica em `src/utils/`, e o `index.ts` só registra a entrada:
+`get_iv_rank_bulk`, `get_backtest_protocolo2`, `get_oportunidades_mensais`) — use
+`handler` em vez de `build`. A lógica fica em `src/utils/`, e o `index.ts` só registra a entrada:
 
 ```typescript
 {
@@ -231,7 +232,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 
 | Rota | Método | Descrição |
 |---|---|---|
-| `/health` | GET | Health check. Retorna `{"status":"ok","tools":32,...}`. Usado pelo Cloud Run. |
+| `/health` | GET | Health check. Retorna `{"status":"ok","tools":33,...}`. Usado pelo Cloud Run. |
 | `/sse` | GET | Abre conexão SSE. Fecha transporte anterior se existir. Retorna stream infinito. |
 | `/messages` | POST | Recebe mensagens JSON-RPC do cliente MCP. Usa `express.text()` + `parsedBody`. |
 

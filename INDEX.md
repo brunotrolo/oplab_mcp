@@ -39,6 +39,7 @@ Claude Web/Mobile
 | `src/index.ts` | Servidor + `TOOL_REGISTRY` (rotas SSE, dispatch `build`/`handler`) | Adicionar ferramenta simples, corrigir rota, ajustar auth |
 | `src/utils/iv_calculator.ts` | Matemática de IV Rank, cache 4h, lotes de 3 (ferramentas compostas) | Ajustar cálculo/cache/lote das ferramentas de IV Rank |
 | `src/utils/backtest_engine.ts` | Backtesting do Protocolo 2 (venda de PUTs), cache 24h, lotes de 3 com 500ms | Ajustar lógica/filtros/simulação do backtest |
+| `src/utils/opportunity_engine.ts` | Plano mensal de travas Bull Put Spread (filtros + dimensionamento de lotes) | Ajustar filtros/seleção de trava/dimensionamento |
 | `Dockerfile` | Build multi-stage node:20-slim | Mudar versão Node, adicionar dep de sistema |
 | `cloudbuild.yaml` | Pipeline build+push+deploy (Cloud Build/trigger) | Mudar passos de CI ou parâmetros de deploy |
 | `deploy.sh` | Deploy completo em um comando (credenciais locais) | Mudar fluxo de deploy manual |
@@ -61,7 +62,7 @@ imports                  ← inclui getIVRankHistorico/getIVRankBulk de ./utils/
 createOplabClient()      ← lê OPLAB_ACCESS_TOKEN, cria Axios instance
 interface PropDef        ← tipo de propriedade do JSON Schema (type, enum, items)
 interface ToolDef        ← entrada do TOOL_REGISTRY: tem build? OU handler?
-TOOL_REGISTRY[]          ← 32 ferramentas: 29 com build, 3 com handler (IV Rank ×2 + backtest) (NÃO REORDENAR)
+TOOL_REGISTRY[]          ← 33 ferramentas: 29 com build, 4 com handler (IV Rank ×2 + backtest + oportunidades) (NÃO REORDENAR)
 pick()                   ← helper: filtra undefined de query params
 withRetry()              ← retry com backoff só em 5xx
 TOOLS_LIST               ← derivado de TOOL_REGISTRY, estático, imutável
@@ -69,7 +70,7 @@ oplabClient              ← singleton Axios
 server                   ← singleton Server (MCP SDK low-level)
 setRequestHandler(List)  ← retorna TOOLS_LIST verbatim
 setRequestHandler(Call)  ← se entry.handler: handler(client,args); senão build() + axios.get
-GET /health              ← health check do Cloud Run ({"tools":32,...})
+GET /health              ← health check do Cloud Run ({"tools":33,...})
 GET /sse                 ← cria SSEServerTransport, server.connect()
 POST /messages           ← express.text() + handlePostMessage(req,res,body)
 app.listen()
@@ -99,6 +100,17 @@ runVariant()              ← walk de entradas c/ anti-sobreposição, p/ um con
 backtestTicker()          ← 1 ativo: preços + cadeia memoizada, roda 4 variantes de filtro
 backtestCache (Map) 24h   ← cache por hash de parâmetros
 getBacktestProtocolo2()   ← orquestra: lotes de 3 (500ms), agrega resumo/comparativo/curva
+```
+
+### `src/utils/opportunity_engine.ts` — blocos internos
+
+```
+extractPuts()             ← parse de /instruments/series?bs=true (put.bs.delta, bid, ask)
+parseVolumePut()          ← volume financeiro de PUT por ativo
+selecionarTrava()         ← perna vendida (maior bid no range) + proteção real; valida prêmio líq.
+avaliarTicker()           ← filtros A/B/C (IV Rank, M9M21, volume) + seleção da trava
+dimensionar()             ← distribui lotes p/ meta dentro da margem (concentração máx 35%)
+getOportunidadesMensais() ← orquestra: lotes de 3 (300ms), monta plano/viabilidade/resumo
 ```
 
 ---
