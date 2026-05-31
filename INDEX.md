@@ -48,6 +48,8 @@ Claude Web/Mobile
 | `package.json` | Dependências e scripts | Adicionar/atualizar pacote |
 | `CLAUDE.md` | Regras para assistentes de IA | Após cada bug crítico resolvido |
 | `INDEX.md` | Este arquivo — mapa do codebase | Após refatoração estrutural |
+| `FERRAMENTAS.md` | Catálogo das 33 ferramentas (o que faz, params, exemplo) | Ao adicionar/alterar uma ferramenta |
+| `CHANGELOG.md` | Histórico de desenvolvimento (PRs) | A cada PR mergeado |
 | `.claude/settings.json` | Comandos pré-aprovados para Claude Code | Adicionar novo comando de deploy |
 | `.claude/rules/` | Regras de escopo por domínio | Após aprender nova restrição importante |
 

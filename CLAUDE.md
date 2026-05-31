@@ -14,6 +14,9 @@ IV Rank fica em **`src/utils/iv_calculator.ts`**, o backtesting do Protocolo 2 e
 **`src/utils/opportunity_engine.ts`** (mantidos separados para deixar o `index.ts`
 enxuto e o transporte SSE estável).
 
+📖 Catálogo completo das ferramentas (o que cada uma faz, parâmetros, exemplos):
+**[FERRAMENTAS.md](FERRAMENTAS.md)**. Histórico de desenvolvimento: **[CHANGELOG.md](CHANGELOG.md)**.
+
 ---
 
 ## Comandos Essenciais
