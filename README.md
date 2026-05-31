@@ -2,6 +2,10 @@
 
 Servidor MCP (Model Context Protocol) construído em TypeScript/Node.js sobre Express, com transporte SSE (Server-Sent Events), hospedado no Google Cloud Run. Expõe **33 ferramentas**: 29 cobrindo toda a seção **Market** da API REST da OpLab v3, 2 ferramentas compostas de **IV Rank** (volatilidade implícita), 1 de **backtesting** do Protocolo 2 e 1 de **plano mensal de travas** Bull Put Spread — todas com cache e processamento em lote.
 
+> 📚 **Documentação:** [FERRAMENTAS.md](FERRAMENTAS.md) (catálogo completo das 33 ferramentas) ·
+> [CHANGELOG.md](CHANGELOG.md) (histórico de desenvolvimento) · [INDEX.md](INDEX.md) (mapa do codebase) ·
+> [CLAUDE.md](CLAUDE.md) (guia para assistentes de IA).
+
 ---
 
 ## Visão Geral da Arquitetura
@@ -34,19 +38,23 @@ api.oplab.com.br/v3
 ```
 oplab_mcp/
 ├── src/
-│   ├── index.ts                # Servidor + TOOL_REGISTRY (rotas, SSE, dispatch)
+│   ├── index.ts                  # Servidor + TOOL_REGISTRY (rotas, SSE, dispatch)
 │   └── utils/
-│       └── iv_calculator.ts    # Matemática de IV Rank + cache + lote (IV tools)
-├── dist/                       # Saída do tsc (gerada)
-├── Dockerfile                  # Multi-stage build (builder + runtime)
-├── cloudbuild.yaml             # Pipeline build+push+deploy (Cloud Build/trigger)
-├── deploy.sh                   # Deploy completo em um comando (credenciais locais)
+│       ├── iv_calculator.ts      # IV Rank: matemática + cache 4h + lote (tools 30/31)
+│       ├── backtest_engine.ts    # Backtesting do Protocolo 2 + trava (tool 32)
+│       └── opportunity_engine.ts # Plano mensal de travas (tool 33)
+├── dist/                         # Saída do tsc (gerada)
+├── Dockerfile                    # Multi-stage build (builder + runtime)
+├── cloudbuild.yaml               # Pipeline build+push+deploy (Cloud Build/trigger)
+├── deploy.sh                     # Deploy completo em um comando (credenciais locais)
 ├── .dockerignore
 ├── package.json
 ├── tsconfig.json
-├── CLAUDE.md                   # Guia para assistentes de IA
-├── INDEX.md                    # Mapa de calor do codebase
-└── README.md                   # Este arquivo
+├── CLAUDE.md                     # Guia para assistentes de IA
+├── INDEX.md                      # Mapa de calor do codebase
+├── FERRAMENTAS.md                # Catálogo completo das 33 ferramentas
+├── CHANGELOG.md                  # Histórico de desenvolvimento (PRs)
+└── README.md                     # Este arquivo
 ```
 
 ### `src/index.ts` — estrutura interna
@@ -62,8 +70,9 @@ oplab_mcp/
 | `CallTool` dispatch | Usa `entry.handler(client, args)` se presente; senão `entry.build()` + GET |
 | Express routes | `/health`, `/sse`, `/messages` |
 
-> A lógica das ferramentas de IV Rank (cálculo, cache de 4h, lotes de 3 com 300ms)
-> vive em `src/utils/iv_calculator.ts` para manter o `index.ts` enxuto e o SSE estável.
+> A lógica das ferramentas compostas vive em `src/utils/` (`iv_calculator.ts`,
+> `backtest_engine.ts`, `opportunity_engine.ts`) para manter o `index.ts` enxuto e o
+> SSE estável. Ver o catálogo completo em [FERRAMENTAS.md](FERRAMENTAS.md).
 
 ---
 
