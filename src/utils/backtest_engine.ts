@@ -94,6 +94,8 @@ export interface BacktestParams {
   dte_max: number;
   iv_rank_min: number;
   m9m21_filter: boolean;
+  use_spread: boolean;
+  spread_width: number;
   periodo_dias: number;
 }
 
@@ -126,6 +128,12 @@ interface SimOp {
   margem: number;
   retorno_margem_pct: number;
   volume_nao_verificado: boolean;
+  // Estrutura da operação. NAKED_PUT (default) ou BULL_PUT_SPREAD (use_spread=true).
+  estrutura: "NAKED_PUT" | "BULL_PUT_SPREAD";
+  strike_protecao?: number;
+  premio_protecao?: number;
+  premio_liquido?: number;
+  perda_maxima?: number;
 }
 
 interface VariantAgg {
@@ -270,23 +278,87 @@ function selectPut(chain: OptionRow[], p: BacktestParams): OptionRow | null {
   return candidatas[0];
 }
 
+/**
+ * Perna de proteção do Bull Put Spread: a PUT comprada do MESMO vencimento com
+ * strike mais próximo de (strike_vendido - spread_width), abaixo do strike vendido.
+ * Usa os prêmios reais da cadeia (sem modelagem teórica).
+ */
+function selectProtective(chain: OptionRow[], sold: OptionRow, spreadWidth: number): OptionRow | null {
+  const alvo = sold.strike - spreadWidth;
+  const protecoes = chain.filter(
+    (o) => o.due_date === sold.due_date && o.strike < sold.strike && o.premium >= 0 && isFinite(o.strike)
+  );
+  if (protecoes.length === 0) return null;
+  protecoes.sort((a, b) => Math.abs(a.strike - alvo) - Math.abs(b.strike - alvo));
+  return protecoes[0];
+}
+
 // ── Simulação de uma operação no vencimento ───────────────────────────────────
 
-function simulate(ticker: string, entradaDate: string, opt: OptionRow, spotVenc: number): SimOp {
-  const margem = round2(opt.strike * CONTRACT_SIZE * MARGIN_STRESS_FACTOR);
+/**
+ * Simula a operação no vencimento.
+ * - NAKED_PUT (default): WIN = prêmio cheio; LOSS = (prêmio - (strike - spot)) — perda grande.
+ * - BULL_PUT_SPREAD (use_spread): vende a PUT e compra a proteção. P/L limitado:
+ *   ganho máx = prêmio líquido; perda máx = (largura efetiva - prêmio líquido) × 100.
+ */
+function simulate(
+  ticker: string,
+  entradaDate: string,
+  opt: OptionRow,
+  spotVenc: number,
+  protecao: OptionRow | null
+): SimOp {
+  const useSpread = protecao !== null;
+
   let resultado: "WIN" | "LOSS";
   let pl: number;
   let pl_pct: number;
+  let margem: number;
+  let base: {
+    estrutura: "NAKED_PUT" | "BULL_PUT_SPREAD";
+    strike_protecao?: number;
+    premio_protecao?: number;
+    premio_liquido?: number;
+    perda_maxima?: number;
+  } = { estrutura: "NAKED_PUT" };
 
-  if (spotVenc > opt.strike) {
-    resultado = "WIN";
-    pl = round2(opt.premium * CONTRACT_SIZE);
-    pl_pct = 100;
+  if (useSpread) {
+    const larguraEfetiva = opt.strike - protecao!.strike; // largura real entre os strikes
+    const premioLiquido = opt.premium - protecao!.premium; // crédito recebido líquido
+    const perdaMaxima = round2(Math.max(0, (larguraEfetiva - premioLiquido) * CONTRACT_SIZE));
+    // Payoff da trava de PUT no vencimento (por ação), depois × lote:
+    //   spot >= strike_vendido        → +premioLiquido
+    //   strike_protecao < spot < venda → +premioLiquido - (strike_vendido - spot)
+    //   spot <= strike_protecao        → +premioLiquido - larguraEfetiva  (= -perda_maxima)
+    let payoffAcao: number;
+    if (spotVenc >= opt.strike) payoffAcao = premioLiquido;
+    else if (spotVenc <= protecao!.strike) payoffAcao = premioLiquido - larguraEfetiva;
+    else payoffAcao = premioLiquido - (opt.strike - spotVenc);
+
+    pl = round2(payoffAcao * CONTRACT_SIZE);
+    resultado = pl >= 0 ? "WIN" : "LOSS";
+    // Margem da trava = risco máximo (capital realmente em jogo).
+    margem = perdaMaxima > 0 ? perdaMaxima : round2(larguraEfetiva * CONTRACT_SIZE);
+    pl_pct = premioLiquido > 0 ? round1((payoffAcao / premioLiquido) * 100) : 0;
+    base = {
+      estrutura: "BULL_PUT_SPREAD",
+      strike_protecao: round2(protecao!.strike),
+      premio_protecao: round2(protecao!.premium),
+      premio_liquido: round2(premioLiquido),
+      perda_maxima: perdaMaxima,
+    };
   } else {
-    resultado = "LOSS";
-    const perda = opt.strike - spotVenc;
-    pl = round2((opt.premium - perda) * CONTRACT_SIZE);
-    pl_pct = round1((pl / (opt.premium * CONTRACT_SIZE)) * 100);
+    margem = round2(opt.strike * CONTRACT_SIZE * MARGIN_STRESS_FACTOR);
+    if (spotVenc > opt.strike) {
+      resultado = "WIN";
+      pl = round2(opt.premium * CONTRACT_SIZE);
+      pl_pct = 100;
+    } else {
+      resultado = "LOSS";
+      const perda = opt.strike - spotVenc;
+      pl = round2((opt.premium - perda) * CONTRACT_SIZE);
+      pl_pct = round1((pl / (opt.premium * CONTRACT_SIZE)) * 100);
+    }
   }
 
   return {
@@ -304,6 +376,7 @@ function simulate(ticker: string, entradaDate: string, opt: OptionRow, spotVenc:
     margem,
     retorno_margem_pct: margem > 0 ? round1((pl / margem) * 100) : 0,
     volume_nao_verificado: true, // volume de PUT não existe no histórico
+    ...base,
   };
 }
 
@@ -354,7 +427,11 @@ async function runVariant(
     const expiryIdx = indexOnOrAfter(dates, opt.due_date);
     if (expiryIdx < 0) continue; // vencimento além dos dados disponíveis
 
-    ops.push(simulate(ticker, dates[di], opt, candles[expiryIdx].close));
+    // Trava (Bull Put Spread): busca a perna de proteção real na mesma cadeia.
+    // Se use_spread mas não houver proteção disponível, cai para naked (protecao=null).
+    const protecao = p.use_spread ? selectProtective(chain, opt, p.spread_width) : null;
+
+    ops.push(simulate(ticker, dates[di], opt, candles[expiryIdx].close, protecao));
     abertaAteIdx = expiryIdx;
   }
   return ops;
@@ -494,6 +571,8 @@ export function normalizarBacktestParams(a: Record<string, unknown>): { params: 
       dte_max: Math.round(num(a.dte_max, 30)),
       iv_rank_min: Math.round(num(a.iv_rank_min, 50)),
       m9m21_filter: a.m9m21_filter === undefined ? true : Boolean(a.m9m21_filter),
+      use_spread: a.use_spread === undefined ? false : Boolean(a.use_spread),
+      spread_width: Math.max(0.01, num(a.spread_width, 3.0)),
       periodo_dias,
     },
     avisoPeriodo,
@@ -507,7 +586,7 @@ export async function getBacktestProtocolo2(client: AxiosInstance, args: Record<
   const { params, avisoPeriodo } = normalizarBacktestParams(args);
 
   // Cache de 24h por parâmetros.
-  const cacheKey = `backtest_${params.tickers.join(",")}_${params.data_inicio}_${params.data_fim}_${params.delta_min}_${params.delta_max}_${params.dte_min}_${params.dte_max}_${params.iv_rank_min}_${params.m9m21_filter}`;
+  const cacheKey = `backtest_${params.tickers.join(",")}_${params.data_inicio}_${params.data_fim}_${params.delta_min}_${params.delta_max}_${params.dte_min}_${params.dte_max}_${params.iv_rank_min}_${params.m9m21_filter}_${params.use_spread}_${params.spread_width}`;
   const cached = backtestCache.get(cacheKey);
   if (cached && Date.now() - cached.timestamp < CACHE_TTL_MS) {
     return {
