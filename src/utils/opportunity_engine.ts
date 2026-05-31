@@ -18,7 +18,7 @@
 // ---------------------------------------------------------------------------
 
 import { AxiosInstance } from "axios";
-import { batchWithLimit, getIVRankHistorico } from "./iv_calculator.js";
+import { batchWithLimit, getIVRankHistorico, normalizarPeriodo } from "./iv_calculator.js";
 
 // ── Constantes / defaults ─────────────────────────────────────────────────────
 
@@ -65,6 +65,7 @@ export interface OportunidadeParams {
   delta_max: number;
   dte_min: number;
   dte_max: number;
+  iv_rank_periodo: number;
   tickers: string[];
 }
 
@@ -98,6 +99,7 @@ export interface OportunidadeResult {
     spread_width: number;
     delta_min: number;
     delta_max: number;
+    iv_rank_periodo: number;
   };
   viabilidade: {
     meta_atingivel: boolean;
@@ -264,16 +266,18 @@ async function avaliarTicker(
     return { ticker: tk, rejeicao: "volume_insuficiente", detalhe: `volume PUT R$${round1(vol / 1e6)}MM < 5MM` };
   }
 
-  // Filtro A: IV Rank >= 50 (janela de 63 dias úteis — relevante operacionalmente).
+  // Filtro A: IV Rank >= 50 na janela escolhida (iv_rank_periodo). 63d reage mais
+  // rápido ao regime atual; 252d compara com a faixa anual inteira — em mercados
+  // que saíram de um pico recente de volatilidade, 252d costuma dar rank mais alto.
   let ivRank = NaN;
   try {
-    const r = await getIVRankHistorico(client, tk, 63);
+    const r = await getIVRankHistorico(client, tk, p.iv_rank_periodo);
     ivRank = r.iv_rank;
   } catch {
     ivRank = NaN;
   }
   if (!(ivRank >= IV_RANK_MIN)) {
-    return { ticker: tk, rejeicao: "iv_rank_baixo", detalhe: `IV Rank 63d=${isFinite(ivRank) ? round1(ivRank) : "n/d"}% < ${IV_RANK_MIN}%` };
+    return { ticker: tk, rejeicao: "iv_rank_baixo", detalhe: `IV Rank ${p.iv_rank_periodo}d=${isFinite(ivRank) ? round1(ivRank) : "n/d"}% < ${IV_RANK_MIN}%` };
   }
 
   // Trava real da cadeia ao vivo (série com bs=true).
@@ -374,6 +378,9 @@ export function normalizarOportunidadeParams(a: Record<string, unknown>): Oportu
     delta_max: num(a.delta_max, -0.15),
     dte_min: Math.round(num(a.dte_min, 15)),
     dte_max: Math.round(num(a.dte_max, 30)),
+    // Período do IV Rank: 21, 63, 126 ou 252 (default 63). normalizarPeriodo cai
+    // para 252 se vier valor inválido; aqui o default específico desta tool é 63.
+    iv_rank_periodo: a.iv_rank_periodo === undefined ? 63 : normalizarPeriodo(a.iv_rank_periodo),
     tickers,
   };
 }
@@ -507,6 +514,7 @@ export async function getOportunidadesMensais(client: AxiosInstance, args: Recor
       spread_width: p.spread_width,
       delta_min: p.delta_min,
       delta_max: p.delta_max,
+      iv_rank_periodo: p.iv_rank_periodo,
     },
     viabilidade: {
       meta_atingivel: metaAtingivel,
@@ -552,6 +560,7 @@ function montarVazio(
       spread_width: p.spread_width,
       delta_min: p.delta_min,
       delta_max: p.delta_max,
+      iv_rank_periodo: p.iv_rank_periodo,
     },
     viabilidade: {
       meta_atingivel: false,

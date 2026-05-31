@@ -421,6 +421,7 @@ const TOOL_REGISTRY: ToolDef[] = [
       delta_max:      { type: "number",  description: "Delta menos negativo aceito na PUT vendida. Padrão: -0.15" },
       dte_min:        { type: "integer", description: "Dias até o vencimento mínimo. Padrão: 15" },
       dte_max:        { type: "integer", description: "Dias até o vencimento máximo. Padrão: 30" },
+      iv_rank_periodo:{ type: "integer", description: "Janela do IV Rank para o filtro de qualidade: 21, 63, 126 ou 252. Padrão: 63 (reage ao regime atual). 252 compara com a faixa anual inteira — costuma aprovar mais ativos quando o mercado saiu de um pico recente de volatilidade." },
       tickers:        { type: "array",   description: "Lista de ativos a avaliar. Se omitido, usa 12 ativos pré-selecionados.", items: { type: "string" } },
     },
     required: ["capital"],

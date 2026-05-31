@@ -276,14 +276,16 @@ Backtesting histórico da venda de PUTs OTM. Para cada dia útil aplica filtros 
 
 ### `get_oportunidades_mensais`
 Monta um plano mensal de travas Bull Put Spread que, combinadas, buscam atingir a meta de prêmio líquido do mês respeitando capital e margem. Aplica filtros de qualidade, seleciona a trava real da cadeia ao vivo e dimensiona os lotes.
-- **Parâmetros:** **`capital`** (R$); opcionais — `meta_mensal` (4000), `margem_max_pct` (0.35), `spread_width` (3.0), `delta_min` (-0.25), `delta_max` (-0.15), `dte_min` (15), `dte_max` (30), `tickers` (padrão = 12 ativos pré-selecionados).
+- **Parâmetros:** **`capital`** (R$); opcionais — `meta_mensal` (4000), `margem_max_pct` (0.35), `spread_width` (3.0), `delta_min` (-0.25), `delta_max` (-0.15), `dte_min` (15), `dte_max` (30), `iv_rank_periodo` (63 — janela do IV Rank: 21/63/126/252), `tickers` (padrão = 12 ativos pré-selecionados).
 - **Exemplos:**
   ```
   get_oportunidades_mensais(capital=130000)
   get_oportunidades_mensais(capital=130000, meta_mensal=6000)
   get_oportunidades_mensais(capital=130000, spread_width=5.0)
+  get_oportunidades_mensais(capital=130000, iv_rank_periodo=252)
   ```
-- **Fluxo:** (A) IV Rank ≥ 50, (B) M9/M21 ≥ 1.0, (C) volume PUT ≥ R$5M → seleção da trava (vende maior bid no range; compra proteção ≈ `vendido − spread_width`) → dimensionamento de lotes para a meta dentro da margem (concentração máx. 35%/ativo).
+- **Fluxo:** (A) IV Rank ≥ 50 na janela `iv_rank_periodo`, (B) M9/M21 ≥ 1.0, (C) volume PUT ≥ R$5M → seleção da trava (vende maior bid no range; compra proteção ≈ `vendido − spread_width`) → dimensionamento de lotes para a meta dentro da margem (concentração máx. 35%/ativo).
+- **`iv_rank_periodo` — qual janela usar?** `63` (padrão) reage rápido ao regime atual; `252` compara com a faixa anual inteira. Quando o mercado saiu de um pico recente de volatilidade, um ativo pode ter IV Rank baixo em 63d (ex.: 18%) mas alto em 252d (ex.: 58%) — usar `252` aprova mais candidatos nesse cenário. A escolha é refletida em `parametros.iv_rank_periodo` e nas mensagens de eliminação (ex.: `IV Rank 252d=44% < 50%`).
 - **Regras de negócio:** nunca `M9/M21 < 1.0`, nunca `delta < -0.30`, descarta prêmio líquido `< R$0,40`.
 - **Campos-chave:** `viabilidade` (meta_atingivel, ativos_aprovados/eliminados, `motivos_eliminacao`), `plano_execucao[]` (venda/compra/trava + `instrucao`), `resumo_financeiro`, `alertas`, `proxima_janela`.
 
