@@ -40,6 +40,7 @@ Claude Web/Mobile
 | `src/utils/iv_calculator.ts` | Matemática de IV Rank, cache 4h, lotes de 3 (ferramentas compostas) | Ajustar cálculo/cache/lote das ferramentas de IV Rank |
 | `src/utils/backtest_engine.ts` | Backtesting do Protocolo 2 (venda de PUTs), cache 24h, lotes de 3 com 500ms | Ajustar lógica/filtros/simulação do backtest |
 | `src/utils/opportunity_engine.ts` | Plano mensal de travas Bull Put Spread (filtros + dimensionamento de lotes) | Ajustar filtros/seleção de trava/dimensionamento |
+| `src/utils/smart_money_tracker.ts` | Whale & Block Trade Tracker (anomalia de fluxo em opções), lotes de 3 | Ajustar filtros de volume/ticket institucional |
 | `Dockerfile` | Build multi-stage node:20-slim | Mudar versão Node, adicionar dep de sistema |
 | `cloudbuild.yaml` | Pipeline build+push+deploy (Cloud Build/trigger) | Mudar passos de CI ou parâmetros de deploy |
 | `deploy.sh` | Deploy completo em um comando (credenciais locais) | Mudar fluxo de deploy manual |
@@ -48,7 +49,7 @@ Claude Web/Mobile
 | `package.json` | Dependências e scripts | Adicionar/atualizar pacote |
 | `CLAUDE.md` | Regras para assistentes de IA | Após cada bug crítico resolvido |
 | `INDEX.md` | Este arquivo — mapa do codebase | Após refatoração estrutural |
-| `FERRAMENTAS.md` | Catálogo das 34 ferramentas (o que faz, params, exemplo) | Ao adicionar/alterar uma ferramenta |
+| `FERRAMENTAS.md` | Catálogo das 35 ferramentas (o que faz, params, exemplo) | Ao adicionar/alterar uma ferramenta |
 | `CHANGELOG.md` | Histórico de desenvolvimento (PRs) | A cada PR mergeado |
 | `.claude/settings.json` | Comandos pré-aprovados para Claude Code | Adicionar novo comando de deploy |
 | `.claude/rules/` | Regras de escopo por domínio | Após aprender nova restrição importante |
@@ -64,7 +65,7 @@ imports                  ← inclui getIVRankHistorico/getIVRankBulk de ./utils/
 createOplabClient()      ← lê OPLAB_ACCESS_TOKEN, cria Axios instance
 interface PropDef        ← tipo de propriedade do JSON Schema (type, enum, items)
 interface ToolDef        ← entrada do TOOL_REGISTRY: tem build? OU handler?
-TOOL_REGISTRY[]          ← 34 ferramentas: 29 com build, 5 com handler (IV Rank ×2 + backtest P2 + oportunidades + backtest quant) (NÃO REORDENAR)
+TOOL_REGISTRY[]          ← 35 ferramentas: 29 com build, 6 com handler (IV Rank ×2 + backtest P2 + oportunidades + backtest quant + smart money) (NÃO REORDENAR)
 pick()                   ← helper: filtra undefined de query params
 withRetry()              ← retry com backoff só em 5xx
 TOOLS_LIST               ← derivado de TOOL_REGISTRY, estático, imutável
@@ -72,7 +73,7 @@ oplabClient              ← singleton Axios
 server                   ← singleton Server (MCP SDK low-level)
 setRequestHandler(List)  ← retorna TOOLS_LIST verbatim
 setRequestHandler(Call)  ← se entry.handler: handler(client,args); senão build() + axios.get
-GET /health              ← health check do Cloud Run ({"tools":34,...})
+GET /health              ← health check do Cloud Run ({"tools":35,...})
 GET /sse                 ← cria SSEServerTransport, server.connect()
 POST /messages           ← express.text() + handlePostMessage(req,res,body)
 app.listen()

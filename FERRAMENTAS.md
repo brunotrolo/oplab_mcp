@@ -318,5 +318,29 @@ Backtest mecânico da venda contínua de PUTs OTM (Short Put / "The Wheel") sobr
 
 ---
 
+## 16. Smart Money Tracker — Whale & Block Trade (composta)
+
+> Lógica em `src/utils/smart_money_tracker.ts`. Lotes de 3 com 300ms (anti-429).
+
+### `get_smart_money_tracker`
+Rastreia fluxo institucional anômalo na cadeia de opções: caça opções de curto prazo com alto volume financeiro no dia, cujo **ticket médio por negócio** é de porte institucional.
+- **Parâmetros (todos opcionais):** `tickers` (padrão = whitelist de 24), `min_financial_volume` (250000 = R$250k), `min_avg_financial_per_trade` (5000 = R$5k de ticket médio), `dte_max` (45).
+- **Exemplos:**
+  ```
+  get_smart_money_tracker()
+  get_smart_money_tracker(tickers=["PETR4","VALE3"], min_financial_volume=500000)
+  ```
+- **Filtros:** DTE ≤ `dte_max`, `financial_volume ≥ min_financial_volume`; e — quando a OpLab popula `trades` — `avg_financial_per_trade ≥ min_avg_financial_per_trade`.
+- **Saída:** `data_varredura`, `ativos_analisados`, `anomalias_encontradas`, e `radares[]` (ordenado por volume financeiro decrescente) com `ticker_opcao`, `ativo_base`, `tipo`, `strike`, `close`, `financial_volume`, `volume`, `trades`, `avg_contracts_per_trade`, `avg_financial_per_trade`, `preco_medio_contrato`, `delta`, `days_to_maturity`, `base_ticket`.
+
+> ⚠️ **Limites de dados da OpLab (honestidade):** a chain `/market/options` **não expõe
+> Open Interest** (por isso o conceito original vol/OI foi descartado) **nem gregas**
+> (`delta` vem `null`). O campo `trades` costuma vir `0`; nesse caso o filtro de ticket
+> médio é ignorado, a triagem usa só o volume financeiro (`base_ticket: "financeiro"`) e
+> `preco_medio_contrato` (= `financial_volume / volume`) serve de proxy do tamanho do
+> contrato. A ferramenta nunca inventa números — só usa o que a API fornece.
+
+---
+
 Ver também: [README.md](README.md) (visão geral + deploy), [INDEX.md](INDEX.md) (mapa do
 codebase), [CHANGELOG.md](CHANGELOG.md) (histórico de desenvolvimento).

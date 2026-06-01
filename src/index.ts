@@ -5,6 +5,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 import axios, { AxiosInstance } from "axios";
 import { getIVRankHistorico, getIVRankBulk, normalizarPeriodo } from "./utils/iv_calculator.js";
 import { getBacktestProtocolo2, runQuantBacktest } from "./utils/backtest_engine.js";
+import { getSmartMoneyTracker } from "./utils/smart_money_tracker.js";
 import { getOportunidadesMensais } from "./utils/opportunity_engine.js";
 
 // ---------------------------------------------------------------------------
@@ -443,6 +444,21 @@ const TOOL_REGISTRY: ToolDef[] = [
     },
     required: ["ticker"],
     handler: (client, a) => runQuantBacktest(client, a),
+  },
+
+  // ── Smart Money Tracker — Whale & Block Trade Tracker ───────────────────────
+  {
+    name: "get_smart_money_tracker",
+    description:
+      "Rastreia fluxo institucional anômalo na cadeia de opções (Whale & Block Trade Tracker). Caça opções de curto prazo com alto volume financeiro no dia cujo TICKET MÉDIO por negócio é de porte institucional (varejo fracionado não sustenta ticket médio alto). Processa em lotes de 3 com 300ms (evita HTTP 429) e ordena por volume financeiro decrescente. Sem 'tickers', varre a whitelist de 24 ativos. OBS: a OpLab não expõe Open Interest nem gregas na chain — por isso o tracker usa volume/trades/financeiro (dados reais) e retorna delta=null.",
+    properties: {
+      tickers:                     { type: "array",   description: "Lista de ativos-base a varrer (ex: [\"PETR4\",\"VALE3\"]). Se omitido, usa a whitelist de 24 ativos.", items: { type: "string" } },
+      min_financial_volume:        { type: "number",  description: "Volume financeiro mínimo da opção no dia, em R$. Padrão: 250000" },
+      min_avg_financial_per_trade: { type: "number",  description: "Ticket médio mínimo por negócio (financial_volume / trades), em R$. Padrão: 5000" },
+      dte_max:                     { type: "integer", description: "Dias até o vencimento máximo (foco no curto prazo). Padrão: 45" },
+    },
+    required: [],
+    handler: (client, a) => getSmartMoneyTracker(client, a),
   },
 ];
 

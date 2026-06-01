@@ -141,14 +141,30 @@ Após o backtest de 2 anos mostrar que **PUT a descoberto não fecha positivo** 
 
 ---
 
+## Ferramenta 35: get_smart_money_tracker · `tools: 34 → 35`
+
+- **`get_smart_money_tracker`** — "Whale & Block Trade Tracker": rastreia fluxo
+  institucional anômalo na cadeia de opções. Lógica isolada em
+  `src/utils/smart_money_tracker.ts`; lotes de 3 com 300ms (anti-429).
+- **Pivô de dados (honestidade institucional):** o conceito original era `volume / open
+  interest`, mas a OpLab **não expõe Open Interest** em nenhum endpoint (verificado ao
+  vivo). Pivotado para detecção de **block trades**: alto volume financeiro com ticket
+  médio por negócio de porte institucional.
+- **Degradação elegante:** a chain costuma vir com `trades = 0`; nesse caso o filtro de
+  ticket médio é ignorado, a triagem usa o volume financeiro (`base_ticket: "financeiro"`)
+  e `preco_medio_contrato` serve de proxy. `delta` vem `null` (gregas não estão na chain).
+  Nenhum dado é inventado.
+
+---
+
 ## Estado atual
 
 | Item | Valor |
 |---|---|
-| Ferramentas | **34** (29 `build` + 5 `handler`) |
-| Health check | `{"status":"ok","tools":34,"api":"reachable"}` |
+| Ferramentas | **35** (29 `build` + 6 `handler`) |
+| Health check | `{"status":"ok","tools":35,"api":"reachable"}` |
 | Região | `us-east1` (Cloud Run) |
-| Módulos de lógica | `iv_calculator.ts`, `backtest_engine.ts`, `opportunity_engine.ts` |
+| Módulos de lógica | `iv_calculator.ts`, `backtest_engine.ts`, `opportunity_engine.ts`, `smart_money_tracker.ts` |
 | Deploy | `./deploy.sh` ou `cloudbuild.yaml` |
 
 Catálogo completo das ferramentas: [FERRAMENTAS.md](FERRAMENTAS.md).
