@@ -705,3 +705,244 @@ export async function getBacktestProtocolo2(client: AxiosInstance, args: Record<
   backtestCache.set(cacheKey, { data: result, timestamp: Date.now() });
   return result;
 }
+
+// ===========================================================================
+// Backtest QUANTITATIVO — venda contínua de PUTs (Short Put / "The Wheel")
+//
+// Simula mecanicamente a venda recorrente de PUTs OTM sobre a série histórica
+// do ativo, num ciclo mensal (~21 pregões), e calcula métricas de risco de
+// nível institucional: retorno, win rate, max drawdown, profit factor e a
+// curva de capital. Ferramenta 34 (get_backtest_quantitativo).
+//
+// Premissas (simplificadas, declaradas):
+//   • Strike da PUT vendida = preço_atual × (1 − alvo_otm_pct)  [proxy de ~Delta 30].
+//   • Prêmio recebido (caixa) = Strike × premio_estimado_pct × 100  (1 lote padrão).
+//   • Margem retida pela corretora = 20% do nocional do Strike (Strike × 100 × 0.20).
+//   • No vencimento (após ~21 pregões):
+//       spot ≥ Strike → PUT vira pó: lucro integral do prêmio (Win).
+//       spot < Strike → exercício: prejuízo = (Strike − spot) × 100, abatido do
+//                       prêmio já recebido (Loss).  P/L_op = prêmio − (Strike−spot)×100.
+// ===========================================================================
+
+/** Cache dedicado de 4h (TTL diferente do backtest do Protocolo 2). */
+const QUANT_CACHE_TTL_MS = 4 * 60 * 60 * 1000;
+const quantCache = new Map<string, { data: QuantBacktestResult; timestamp: number }>();
+
+/** Limpa o cache do backtest quantitativo (usado em testes). */
+export function clearQuantBacktestCache(): void {
+  quantCache.clear();
+}
+
+const QUANT_CICLO_PREGOES = 21;     // ~1 vencimento mensal de opções
+const QUANT_MARGEM_PCT = 0.20;      // corretora retém 20% do nocional do strike
+const QUANT_REQUEST_TIMEOUT_MS = 15_000;
+
+export interface QuantBacktestParams {
+  ticker: string;
+  capital_inicial: number;
+  dias_historico: number;
+  alvo_otm_pct: number;
+  premio_estimado_pct: number;
+}
+
+export interface QuantOperacao {
+  ciclo: number;
+  data_entrada: string;
+  data_saida: string;
+  spot_entrada: number;
+  strike: number;
+  premio: number;
+  spot_saida: number;
+  resultado: "WIN" | "LOSS";
+  pl: number;
+  caixa_apos: number;
+}
+
+export interface QuantBacktestResult {
+  ticker: string;
+  parametros: QuantBacktestParams;
+  capital_final: number;
+  retorno_total_pct: number;
+  win_rate_pct: number;
+  max_drawdown_pct: number;
+  profit_factor: number | null;
+  operacoes_realizadas: number;
+  wins: number;
+  losses: number;
+  curva_capital: Array<{ ciclo: number; data: string; capital: number }>;
+  operacoes: QuantOperacao[];
+  cache_hit: boolean;
+  alertas: string[];
+}
+
+/** Normaliza e aplica defaults aos parâmetros da ferramenta. */
+export function normalizarQuantParams(a: Record<string, unknown>): QuantBacktestParams {
+  const n = (v: unknown, def: number): number => {
+    const x = Number(v);
+    return Number.isFinite(x) ? x : def;
+  };
+  return {
+    ticker: String(a.ticker ?? "").toUpperCase(),
+    capital_inicial: Math.max(1, n(a.capital_inicial, 50_000)),
+    // Teto de 2 anos para evitar timeout (mesma política do outro backtest).
+    dias_historico: Math.min(MAX_PERIOD_DAYS, Math.max(60, Math.round(n(a.dias_historico, 730)))),
+    alvo_otm_pct: Math.min(0.5, Math.max(0, n(a.alvo_otm_pct, 0.05))),
+    premio_estimado_pct: Math.min(0.5, Math.max(0.0001, n(a.premio_estimado_pct, 0.02))),
+  };
+}
+
+/**
+ * Executa o backtest quantitativo de venda contínua de PUTs.
+ * Lança Error com mensagem clara em falha de dados; o handler do index.ts
+ * converte em resposta de erro do MCP.
+ */
+export async function runQuantBacktest(
+  client: AxiosInstance,
+  args: Record<string, unknown>
+): Promise<QuantBacktestResult> {
+  const p = normalizarQuantParams(args);
+  if (!p.ticker) {
+    throw new Error("Parâmetro 'ticker' é obrigatório (ex: PETR4).");
+  }
+
+  // Cache de 4h por (ticker + parâmetros).
+  const cacheKey = `quant_${p.ticker}_${p.dias_historico}_${p.alvo_otm_pct}_${p.premio_estimado_pct}_${p.capital_inicial}`;
+  const cached = quantCache.get(cacheKey);
+  if (cached && Date.now() - cached.timestamp < QUANT_CACHE_TTL_MS) {
+    return { ...cached.data, cache_hit: true };
+  }
+
+  // 1) DADOS — série de fechamentos via OpLab, com try/catch e mensagem clara.
+  const to = new Date();
+  const from = new Date(to.getTime() - p.dias_historico * DAY_MS);
+  const fmt = (d: Date) => d.toISOString().slice(0, 10);
+  let candles: Candle[];
+  try {
+    const { data } = await client.get(`/market/historical/${p.ticker}/1d`, {
+      params: { from: fmt(from), to: fmt(to) },
+      timeout: QUANT_REQUEST_TIMEOUT_MS,
+    });
+    candles = extractCandles(data);
+  } catch (e) {
+    const status = (e as { response?: { status?: number } })?.response?.status;
+    throw new Error(
+      `Falha ao buscar histórico de ${p.ticker} na OpLab${status ? ` (HTTP ${status})` : ""}. ` +
+        `Verifique o código do ativo e tente novamente.`
+    );
+  }
+  if (candles.length < QUANT_CICLO_PREGOES + 1) {
+    throw new Error(
+      `Histórico insuficiente para ${p.ticker}: ${candles.length} pregões (mínimo ${QUANT_CICLO_PREGOES + 1}).`
+    );
+  }
+
+  // 2) SIMULAÇÃO MECÂNICA — loop temporal em ciclos de 21 pregões.
+  let caixa = p.capital_inicial;
+  const operacoes: QuantOperacao[] = [];
+  const curva_capital: Array<{ ciclo: number; data: string; capital: number }> = [
+    { ciclo: 0, data: candles[0].date, capital: round2(caixa) },
+  ];
+  // Para o max drawdown e o profit factor:
+  let pico = caixa;          // maior capital já atingido (topo)
+  let maxDrawdown = 0;       // maior queda percentual topo→fundo
+  let somaLucros = 0;        // Σ |P/L| das operações vencedoras
+  let somaPrejuizos = 0;     // Σ |P/L| das operações perdedoras
+  const alertas: string[] = [];
+
+  let ciclo = 0;
+  for (let i = 0; i + QUANT_CICLO_PREGOES < candles.length; i += QUANT_CICLO_PREGOES) {
+    ciclo++;
+    const entrada = candles[i];
+    const saida = candles[i + QUANT_CICLO_PREGOES];
+
+    // ENTRADA — vende a PUT OTM.
+    const strike = entrada.close * (1 - p.alvo_otm_pct);
+    const premio = strike * p.premio_estimado_pct * CONTRACT_SIZE; // caixa recebido
+    const margem = strike * CONTRACT_SIZE * QUANT_MARGEM_PCT;
+
+    // Checagem de margem: o caixa livre precisa suportar a retenção.
+    if (caixa < margem) {
+      alertas.push(
+        `Ciclo ${ciclo} (${entrada.date}): capital livre R$${round2(caixa)} < margem exigida ` +
+          `R$${round2(margem)} — operação pulada por falta de margem.`
+      );
+      continue;
+    }
+
+    // Recebe o prêmio em caixa no momento da venda.
+    caixa += premio;
+
+    // VENCIMENTO — liquida no preço de saída (após ~21 pregões).
+    let resultado: "WIN" | "LOSS";
+    let pl: number;
+    if (saida.close >= strike) {
+      // PUT vira pó: lucro integral do prêmio.
+      resultado = "WIN";
+      pl = round2(premio);
+      somaLucros += premio;
+    } else {
+      // Exercício: prejuízo no spot abaixo do strike, abatido do prêmio.
+      resultado = "LOSS";
+      const prejuizoExercicio = (strike - saida.close) * CONTRACT_SIZE;
+      caixa -= prejuizoExercicio;
+      pl = round2(premio - prejuizoExercicio); // P/L líquido da operação
+      somaPrejuizos += Math.abs(pl); // |perda líquida| (pode ser negativa → abs)
+    }
+
+    operacoes.push({
+      ciclo,
+      data_entrada: entrada.date,
+      data_saida: saida.date,
+      spot_entrada: round2(entrada.close),
+      strike: round2(strike),
+      premio: round2(premio),
+      spot_saida: round2(saida.close),
+      resultado,
+      pl,
+      caixa_apos: round2(caixa),
+    });
+    curva_capital.push({ ciclo, data: saida.date, capital: round2(caixa) });
+
+    // MAX DRAWDOWN — atualiza topo e mede a maior queda percentual topo→fundo.
+    if (caixa > pico) pico = caixa;
+    if (pico > 0) {
+      const dd = (pico - caixa) / pico; // fração do topo perdida
+      if (dd > maxDrawdown) maxDrawdown = dd;
+    }
+  }
+
+  // 3) MÉTRICAS QUANTITATIVAS
+  const wins = operacoes.filter((o) => o.resultado === "WIN").length;
+  const losses = operacoes.length - wins;
+  const capital_final = round2(caixa);
+  const retorno_total_pct = round2(((caixa / p.capital_inicial) - 1) * 100);
+  const win_rate_pct = operacoes.length ? round1((wins / operacoes.length) * 100) : 0;
+  const max_drawdown_pct = round2(maxDrawdown * 100);
+  // Profit factor = Σ lucros / Σ prejuízos. null quando não houve prejuízo
+  // (indefinido matematicamente; sinaliza "sem perdas" em vez de forçar ∞).
+  const profit_factor = somaPrejuizos > 0 ? round2(somaLucros / somaPrejuizos) : null;
+
+  if (operacoes.length === 0) {
+    alertas.push("Nenhuma operação realizada — histórico curto ou margem insuficiente para o capital informado.");
+  }
+
+  const result: QuantBacktestResult = {
+    ticker: p.ticker,
+    parametros: p,
+    capital_final,
+    retorno_total_pct,
+    win_rate_pct,
+    max_drawdown_pct,
+    profit_factor,
+    operacoes_realizadas: operacoes.length,
+    wins,
+    losses,
+    curva_capital,
+    operacoes,
+    cache_hit: false,
+    alertas,
+  };
+
+  quantCache.set(cacheKey, { data: result, timestamp: Date.now() });
+  return result;
+}

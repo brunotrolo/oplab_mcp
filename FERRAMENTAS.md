@@ -295,5 +295,26 @@ Monta um plano mensal de travas Bull Put Spread que, combinadas, buscam atingir 
 
 ---
 
+## 15. Backtest quantitativo — venda contínua de PUTs (composta)
+
+> Lógica em `src/utils/backtest_engine.ts` (`runQuantBacktest`). **Analítica — apenas simula.** Cache de **4h**.
+
+### `get_backtest_quantitativo`
+Backtest mecânico da venda contínua de PUTs OTM (Short Put / "The Wheel") sobre a série histórica do ativo. A cada ~21 pregões vende uma PUT com strike `alvo_otm_pct` abaixo do spot, recebe um prêmio estimado e liquida no vencimento. Calcula métricas de risco institucionais.
+- **Parâmetros:** **`ticker`**; opcionais — `capital_inicial` (50000), `dias_historico` (730; teto 2 anos), `alvo_otm_pct` (0.05 = 5% OTM ≈ Delta 30), `premio_estimado_pct` (0.02 = 2% do strike).
+- **Exemplos:**
+  ```
+  get_backtest_quantitativo(ticker="PETR4")
+  get_backtest_quantitativo(ticker="VALE3", capital_inicial=100000, alvo_otm_pct=0.07)
+  ```
+- **Mecânica (por ciclo de 21 pregões):** strike = `spot × (1 − alvo_otm_pct)`; prêmio = `strike × premio_estimado_pct × 100`; margem retida = `strike × 100 × 0.20`. No vencimento: `spot ≥ strike` → PUT vira pó (lucro = prêmio, WIN); `spot < strike` → exercício (P/L = prêmio − `(strike − spot) × 100`, LOSS).
+- **Métricas no retorno:** `capital_final`, `retorno_total_pct`, `win_rate_pct`, **`max_drawdown_pct`** (maior queda topo→fundo do capital), **`profit_factor`** (Σ lucros / Σ prejuízos; `> 1.5` = excelente; `null` quando não há perdas), `operacoes_realizadas`, `wins`/`losses`, `curva_capital[]` e `operacoes[]` detalhadas.
+
+> ⚠️ Aproximação **determinística**: strike e prêmio são estimados por percentuais
+> (não usa a cadeia real de opções nem IV). Serve para medir o comportamento mecânico
+> da estratégia ao longo do tempo, não para precificar uma operação específica.
+
+---
+
 Ver também: [README.md](README.md) (visão geral + deploy), [INDEX.md](INDEX.md) (mapa do
 codebase), [CHANGELOG.md](CHANGELOG.md) (histórico de desenvolvimento).

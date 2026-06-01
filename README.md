@@ -1,8 +1,8 @@
 # OpLab MCP Server
 
-Servidor MCP (Model Context Protocol) construído em TypeScript/Node.js sobre Express, com transporte SSE (Server-Sent Events), hospedado no Google Cloud Run. Expõe **33 ferramentas**: 29 cobrindo toda a seção **Market** da API REST da OpLab v3, 2 ferramentas compostas de **IV Rank** (volatilidade implícita), 1 de **backtesting** do Protocolo 2 e 1 de **plano mensal de travas** Bull Put Spread — todas com cache e processamento em lote.
+Servidor MCP (Model Context Protocol) construído em TypeScript/Node.js sobre Express, com transporte SSE (Server-Sent Events), hospedado no Google Cloud Run. Expõe **34 ferramentas**: 29 cobrindo toda a seção **Market** da API REST da OpLab v3, 2 ferramentas compostas de **IV Rank** (volatilidade implícita), 1 de **backtesting** do Protocolo 2, 1 de **plano mensal de travas** Bull Put Spread e 1 de **backtest quantitativo** (venda contínua de PUTs) — todas com cache e processamento em lote.
 
-> 📚 **Documentação:** [FERRAMENTAS.md](FERRAMENTAS.md) (catálogo completo das 33 ferramentas) ·
+> 📚 **Documentação:** [FERRAMENTAS.md](FERRAMENTAS.md) (catálogo completo das 34 ferramentas) ·
 > [CHANGELOG.md](CHANGELOG.md) (histórico de desenvolvimento) · [INDEX.md](INDEX.md) (mapa do codebase) ·
 > [CLAUDE.md](CLAUDE.md) (guia para assistentes de IA).
 
@@ -41,7 +41,7 @@ oplab_mcp/
 │   ├── index.ts                  # Servidor + TOOL_REGISTRY (rotas, SSE, dispatch)
 │   └── utils/
 │       ├── iv_calculator.ts      # IV Rank: matemática + cache 4h + lote (tools 30/31)
-│       ├── backtest_engine.ts    # Backtesting do Protocolo 2 + trava (tool 32)
+│       ├── backtest_engine.ts    # Backtest Protocolo 2 + trava (32) e quantitativo (34)
 │       └── opportunity_engine.ts # Plano mensal de travas (tool 33)
 ├── dist/                         # Saída do tsc (gerada)
 ├── Dockerfile                    # Multi-stage build (builder + runtime)
@@ -52,7 +52,7 @@ oplab_mcp/
 ├── tsconfig.json
 ├── CLAUDE.md                     # Guia para assistentes de IA
 ├── INDEX.md                      # Mapa de calor do codebase
-├── FERRAMENTAS.md                # Catálogo completo das 33 ferramentas
+├── FERRAMENTAS.md                # Catálogo completo das 34 ferramentas
 ├── CHANGELOG.md                  # Histórico de desenvolvimento (PRs)
 └── README.md                     # Este arquivo
 ```
@@ -63,7 +63,7 @@ oplab_mcp/
 |---|---|
 | `createOplabClient()` | Cria instância Axios com `Access-Token` header |
 | `interface PropDef / ToolDef` | Tipos do registro de ferramentas (campos `build` **ou** `handler`) |
-| `TOOL_REGISTRY` | Array com 33 ferramentas (29 com `build`, 4 com `handler`) |
+| `TOOL_REGISTRY` | Array com 34 ferramentas (29 com `build`, 5 com `handler`) |
 | `pick()` | Helper para filtrar parâmetros opcionais undefined |
 | `TOOLS_LIST` | Lista estática derivada de `TOOL_REGISTRY` (retornada no `ListTools`) |
 | `server` (singleton) | `Server` do SDK, handlers registrados uma vez |
@@ -182,7 +182,7 @@ gcloud run deploy oplab-mcp-server \
 
 # 3. Verificar deploy
 curl https://SUA_URL.run.app/health
-# Resposta esperada: {"status":"ok","tools":33,"api":"reachable"}
+# Resposta esperada: {"status":"ok","tools":34,"api":"reachable"}
 ```
 
 </details>
@@ -446,5 +446,5 @@ OPLAB_ACCESS_TOKEN="seu_token" npm start
 
 # Testar health check
 curl http://localhost:8080/health
-# Resposta esperada: {"status":"ok","tools":33,"api":"reachable"}
+# Resposta esperada: {"status":"ok","tools":34,"api":"reachable"}
 ```
