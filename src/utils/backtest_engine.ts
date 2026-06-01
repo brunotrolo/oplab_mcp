@@ -743,6 +743,7 @@ export interface QuantBacktestParams {
   dias_historico: number;
   alvo_otm_pct: number;
   premio_estimado_pct: number;
+  alocacao_margem_pct: number;
 }
 
 export interface QuantOperacao {
@@ -751,6 +752,8 @@ export interface QuantOperacao {
   data_saida: string;
   spot_entrada: number;
   strike: number;
+  quantidade: number;     // nº de opções vendidas (múltiplo de 100)
+  margem_alocada: number; // margem de garantia retida na abertura
   premio: number;
   spot_saida: number;
   resultado: "WIN" | "LOSS";
@@ -788,6 +791,9 @@ export function normalizarQuantParams(a: Record<string, unknown>): QuantBacktest
     dias_historico: Math.min(MAX_PERIOD_DAYS, Math.max(60, Math.round(n(a.dias_historico, 730)))),
     alvo_otm_pct: Math.min(0.5, Math.max(0, n(a.alvo_otm_pct, 0.05))),
     premio_estimado_pct: Math.min(0.5, Math.max(0.0001, n(a.premio_estimado_pct, 0.02))),
+    // Fração do caixa livre usada como margem de garantia na abertura (0–1).
+    // Limitada a 1.0 (não faz sentido alocar mais que o caixa disponível).
+    alocacao_margem_pct: Math.min(1, Math.max(0.01, n(a.alocacao_margem_pct, 0.20))),
   };
 }
 
@@ -806,7 +812,7 @@ export async function runQuantBacktest(
   }
 
   // Cache de 4h por (ticker + parâmetros).
-  const cacheKey = `quant_${p.ticker}_${p.dias_historico}_${p.alvo_otm_pct}_${p.premio_estimado_pct}_${p.capital_inicial}`;
+  const cacheKey = `quant_${p.ticker}_${p.dias_historico}_${p.alvo_otm_pct}_${p.premio_estimado_pct}_${p.capital_inicial}_${p.alocacao_margem_pct}`;
   const cached = quantCache.get(cacheKey);
   if (cached && Date.now() - cached.timestamp < QUANT_CACHE_TTL_MS) {
     return { ...cached.data, cache_hit: true };
@@ -855,19 +861,34 @@ export async function runQuantBacktest(
     const entrada = candles[i];
     const saida = candles[i + QUANT_CICLO_PREGOES];
 
-    // ENTRADA — vende a PUT OTM.
+    // ENTRADA — vende a PUT OTM com DIMENSIONAMENTO DINÂMICO de posição.
     const strike = entrada.close * (1 - p.alvo_otm_pct);
-    const premio = strike * p.premio_estimado_pct * CONTRACT_SIZE; // caixa recebido
-    const margem = strike * CONTRACT_SIZE * QUANT_MARGEM_PCT;
 
-    // Checagem de margem: o caixa livre precisa suportar a retenção.
-    if (caixa < margem) {
+    // Position sizing: aloca uma fração do CAIXA LIVRE atual como margem (juros
+    // compostos — a base cresce/encolhe com o resultado acumulado). A corretora
+    // exige 20% do strike por opção como garantia. A quantidade é arredondada
+    // para baixo ao múltiplo de 100 (lote padrão da B3).
+    const margemPorOpcao = strike * QUANT_MARGEM_PCT; // garantia exigida por opção
+    let quantidade = 0;
+    if (strike > 0 && margemPorOpcao > 0 && caixa > 0) {
+      const margemDisponivel = caixa * p.alocacao_margem_pct;
+      const qtdMaxima = Math.floor(margemDisponivel / margemPorOpcao);
+      quantidade = Math.floor(qtdMaxima / CONTRACT_SIZE) * CONTRACT_SIZE; // múltiplo de 100
+    }
+
+    // Capital insuficiente para ao menos 1 lote padrão → não entra.
+    if (quantidade < CONTRACT_SIZE) {
       alertas.push(
-        `Ciclo ${ciclo} (${entrada.date}): capital livre R$${round2(caixa)} < margem exigida ` +
-          `R$${round2(margem)} — operação pulada por falta de margem.`
+        `Ciclo ${ciclo} (${entrada.date}): caixa R$${round2(caixa)} aloca margem ` +
+          `R$${round2(caixa * p.alocacao_margem_pct)} — insuficiente para 1 lote ` +
+          `(margem/opção R$${round2(margemPorOpcao)}). Operação pulada.`
       );
       continue;
     }
+
+    const margemAlocada = quantidade * margemPorOpcao; // garantia efetivamente retida
+    // Prêmio recebido escala com a quantidade vendida.
+    const premio = strike * p.premio_estimado_pct * quantidade;
 
     // Recebe o prêmio em caixa no momento da venda.
     caixa += premio;
@@ -881,12 +902,12 @@ export async function runQuantBacktest(
       pl = round2(premio);
       somaLucros += premio;
     } else {
-      // Exercício: prejuízo no spot abaixo do strike, abatido do prêmio.
+      // Exercício: prejuízo proporcional à quantidade vendida, abatido do prêmio.
       resultado = "LOSS";
-      const prejuizoExercicio = (strike - saida.close) * CONTRACT_SIZE;
+      const prejuizoExercicio = (strike - saida.close) * quantidade;
       caixa -= prejuizoExercicio;
       pl = round2(premio - prejuizoExercicio); // P/L líquido da operação
-      somaPrejuizos += Math.abs(pl); // |perda líquida| (pode ser negativa → abs)
+      somaPrejuizos += Math.abs(pl); // |perda líquida|
     }
 
     operacoes.push({
@@ -895,6 +916,8 @@ export async function runQuantBacktest(
       data_saida: saida.date,
       spot_entrada: round2(entrada.close),
       strike: round2(strike),
+      quantidade,
+      margem_alocada: round2(margemAlocada),
       premio: round2(premio),
       spot_saida: round2(saida.close),
       resultado,

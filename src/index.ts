@@ -432,13 +432,14 @@ const TOOL_REGISTRY: ToolDef[] = [
   {
     name: "get_backtest_quantitativo",
     description:
-      "Ferramenta ANALÍTICA (apenas simula — não envia ordens). Backtest mecânico da venda contínua de PUTs OTM (Short Put / 'The Wheel') sobre a série histórica do ativo: a cada ~21 pregões vende uma PUT com strike alvo_otm_pct abaixo do spot, recebe prêmio estimado e liquida no vencimento. Retorna métricas de risco institucionais: capital final, retorno total, win rate, max drawdown, profit factor, nº de operações e curva de capital. Premissas simplificadas (strike e prêmio estimados por percentuais) — é uma aproximação determinística, não usa a cadeia real de opções. Cache de 4h.",
+      "Ferramenta ANALÍTICA (apenas simula — não envia ordens). Backtest mecânico da venda contínua de PUTs OTM (Short Put / 'The Wheel') sobre a série histórica do ativo: a cada ~21 pregões vende PUTs com strike alvo_otm_pct abaixo do spot, recebe prêmio estimado e liquida no vencimento. Usa DIMENSIONAMENTO DINÂMICO de posição (aloca uma fração do caixa livre como margem a cada ciclo → juros compostos) com quantidade em múltiplos de 100 (lote B3). Retorna métricas de risco institucionais: capital final, retorno total, win rate, max drawdown, profit factor, nº de operações e curva de capital. Premissas simplificadas (strike e prêmio estimados por percentuais) — é uma aproximação determinística, não usa a cadeia real de opções. Cache de 4h.",
     properties: {
       ticker:              { type: "string", description: "Código do ativo (ex: PETR4). OBRIGATÓRIO." },
       capital_inicial:     { type: "number", description: "Caixa inicial em R$. Padrão: 50000" },
       dias_historico:      { type: "number", description: "Janela de histórico em dias corridos. Padrão: 730 (2 anos); teto de 2 anos." },
       alvo_otm_pct:        { type: "number", description: "Distância do strike abaixo do spot (fração). Padrão: 0.05 (5% OTM ≈ Delta 30)." },
       premio_estimado_pct: { type: "number", description: "Prêmio recebido como fração do strike. Padrão: 0.02 (2% do strike)." },
+      alocacao_margem_pct: { type: "number", description: "Fração do caixa livre alocada como margem de garantia na abertura de cada posição (0-1). Padrão: 0.20 (20%). Maior = posições maiores e mais risco." },
     },
     required: ["ticker"],
     handler: (client, a) => runQuantBacktest(client, a),
