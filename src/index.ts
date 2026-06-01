@@ -4,7 +4,7 @@ import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import axios, { AxiosInstance } from "axios";
 import { getIVRankHistorico, getIVRankBulk, normalizarPeriodo } from "./utils/iv_calculator.js";
-import { getBacktestProtocolo2 } from "./utils/backtest_engine.js";
+import { getBacktestProtocolo2, runQuantBacktest } from "./utils/backtest_engine.js";
 import { getOportunidadesMensais } from "./utils/opportunity_engine.js";
 
 // ---------------------------------------------------------------------------
@@ -426,6 +426,22 @@ const TOOL_REGISTRY: ToolDef[] = [
     },
     required: ["capital"],
     handler: (client, a) => getOportunidadesMensais(client, a),
+  },
+
+  // ── Backtest quantitativo — venda contínua de PUTs (The Wheel) ──────────────
+  {
+    name: "get_backtest_quantitativo",
+    description:
+      "Ferramenta ANALÍTICA (apenas simula — não envia ordens). Backtest mecânico da venda contínua de PUTs OTM (Short Put / 'The Wheel') sobre a série histórica do ativo: a cada ~21 pregões vende uma PUT com strike alvo_otm_pct abaixo do spot, recebe prêmio estimado e liquida no vencimento. Retorna métricas de risco institucionais: capital final, retorno total, win rate, max drawdown, profit factor, nº de operações e curva de capital. Premissas simplificadas (strike e prêmio estimados por percentuais) — é uma aproximação determinística, não usa a cadeia real de opções. Cache de 4h.",
+    properties: {
+      ticker:              { type: "string", description: "Código do ativo (ex: PETR4). OBRIGATÓRIO." },
+      capital_inicial:     { type: "number", description: "Caixa inicial em R$. Padrão: 50000" },
+      dias_historico:      { type: "number", description: "Janela de histórico em dias corridos. Padrão: 730 (2 anos); teto de 2 anos." },
+      alvo_otm_pct:        { type: "number", description: "Distância do strike abaixo do spot (fração). Padrão: 0.05 (5% OTM ≈ Delta 30)." },
+      premio_estimado_pct: { type: "number", description: "Prêmio recebido como fração do strike. Padrão: 0.02 (2% do strike)." },
+    },
+    required: ["ticker"],
+    handler: (client, a) => runQuantBacktest(client, a),
   },
 ];
 

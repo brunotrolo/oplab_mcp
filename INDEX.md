@@ -48,7 +48,7 @@ Claude Web/Mobile
 | `package.json` | Dependências e scripts | Adicionar/atualizar pacote |
 | `CLAUDE.md` | Regras para assistentes de IA | Após cada bug crítico resolvido |
 | `INDEX.md` | Este arquivo — mapa do codebase | Após refatoração estrutural |
-| `FERRAMENTAS.md` | Catálogo das 33 ferramentas (o que faz, params, exemplo) | Ao adicionar/alterar uma ferramenta |
+| `FERRAMENTAS.md` | Catálogo das 34 ferramentas (o que faz, params, exemplo) | Ao adicionar/alterar uma ferramenta |
 | `CHANGELOG.md` | Histórico de desenvolvimento (PRs) | A cada PR mergeado |
 | `.claude/settings.json` | Comandos pré-aprovados para Claude Code | Adicionar novo comando de deploy |
 | `.claude/rules/` | Regras de escopo por domínio | Após aprender nova restrição importante |
@@ -64,7 +64,7 @@ imports                  ← inclui getIVRankHistorico/getIVRankBulk de ./utils/
 createOplabClient()      ← lê OPLAB_ACCESS_TOKEN, cria Axios instance
 interface PropDef        ← tipo de propriedade do JSON Schema (type, enum, items)
 interface ToolDef        ← entrada do TOOL_REGISTRY: tem build? OU handler?
-TOOL_REGISTRY[]          ← 33 ferramentas: 29 com build, 4 com handler (IV Rank ×2 + backtest + oportunidades) (NÃO REORDENAR)
+TOOL_REGISTRY[]          ← 34 ferramentas: 29 com build, 5 com handler (IV Rank ×2 + backtest P2 + oportunidades + backtest quant) (NÃO REORDENAR)
 pick()                   ← helper: filtra undefined de query params
 withRetry()              ← retry com backoff só em 5xx
 TOOLS_LIST               ← derivado de TOOL_REGISTRY, estático, imutável
@@ -72,7 +72,7 @@ oplabClient              ← singleton Axios
 server                   ← singleton Server (MCP SDK low-level)
 setRequestHandler(List)  ← retorna TOOLS_LIST verbatim
 setRequestHandler(Call)  ← se entry.handler: handler(client,args); senão build() + axios.get
-GET /health              ← health check do Cloud Run ({"tools":33,...})
+GET /health              ← health check do Cloud Run ({"tools":34,...})
 GET /sse                 ← cria SSEServerTransport, server.connect()
 POST /messages           ← express.text() + handlePostMessage(req,res,body)
 app.listen()

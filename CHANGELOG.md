@@ -112,12 +112,41 @@ Após o backtest de 2 anos mostrar que **PUT a descoberto não fecha positivo** 
 
 ---
 
+## PR #21–#24 — Documentação e refinamentos
+
+- **#21** — documentação completa (`FERRAMENTAS.md` + `CHANGELOG.md`).
+- **#22** — correção do validador de suficiência de histórico do IV Rank: a suficiência
+  passa a ser avaliada **em relação ao período solicitado**, não contra um limiar fixo
+  de 126 (corrige o falso `INSUFICIENTE` em janelas como 63d com ~102 candles).
+- **#23** — parâmetro `iv_rank_periodo` (21/63/126/252, default 63) em
+  `get_oportunidades_mensais`, deixando o usuário escolher a janela do IV Rank.
+- **#24** — orientação na descrição da ferramenta para o modelo passar
+  `iv_rank_periodo=252` quando ativos forem reprovados por IV Rank.
+
+---
+
+## Ferramenta 34: get_backtest_quantitativo · `tools: 33 → 34`
+
+- **`get_backtest_quantitativo`** — ferramenta **analítica** (apenas simula) que faz
+  backtesting mecânico da venda contínua de PUTs OTM (Short Put / "The Wheel"). Lógica
+  isolada em `src/utils/backtest_engine.ts` (`runQuantBacktest`).
+- **Mecânica:** a cada ~21 pregões vende uma PUT com strike `alvo_otm_pct` abaixo do spot,
+  recebe prêmio estimado (`strike × premio_estimado_pct × 100`), retém 20% de margem e
+  liquida no vencimento (vira pó se `spot ≥ strike`; exercício caso contrário).
+- **Métricas institucionais:** capital final, retorno total, win rate, **max drawdown**
+  (queda topo→fundo), **profit factor** (Σ lucros / Σ prejuízos), nº de operações e curva
+  de capital.
+- **Cache de 4h.** Aproximação determinística (strike/prêmio por percentuais, sem a cadeia
+  real de opções). Validado contra dados reais de produção (PETR4, 414 pregões).
+
+---
+
 ## Estado atual
 
 | Item | Valor |
 |---|---|
-| Ferramentas | **33** (29 `build` + 4 `handler`) |
-| Health check | `{"status":"ok","tools":33,"api":"reachable"}` |
+| Ferramentas | **34** (29 `build` + 5 `handler`) |
+| Health check | `{"status":"ok","tools":34,"api":"reachable"}` |
 | Região | `us-east1` (Cloud Run) |
 | Módulos de lógica | `iv_calculator.ts`, `backtest_engine.ts`, `opportunity_engine.ts` |
 | Deploy | `./deploy.sh` ou `cloudbuild.yaml` |
