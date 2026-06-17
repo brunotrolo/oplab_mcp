@@ -1,6 +1,6 @@
 import express, { Request, Response } from "express";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import axios, { AxiosInstance } from "axios";
 import { getIVRankHistorico, getIVRankBulk, normalizarPeriodo } from "./utils/iv_calculator.js";
@@ -505,14 +505,15 @@ try {
   process.exit(1);
 }
 
-const server = new Server(
-  { name: "oplab-mcp-server", version: "1.0.0" },
-  { capabilities: { tools: {} } }
-);
+function createServer(): Server {
+  const server = new Server(
+    { name: "oplab-mcp-server", version: "1.0.0" },
+    { capabilities: { tools: {} } }
+  );
 
-server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS_LIST }));
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS_LIST }));
 
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args = {} } = request.params;
   const entry = TOOL_REGISTRY.find((t) => t.name === name);
 
@@ -541,13 +542,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 });
 
+  return server;
+}
+
 // ---------------------------------------------------------------------------
-// Express + SSE transport
+// Express + Streamable HTTP transport (stateless — sem conexão pendurada)
 // ---------------------------------------------------------------------------
 
 const app = express();
-
-let sseTransport: SSEServerTransport | null = null;
 
 app.get("/health", async (_req: Request, res: Response) => {
   try {
@@ -558,22 +560,24 @@ app.get("/health", async (_req: Request, res: Response) => {
   }
 });
 
-app.get("/sse", async (_req: Request, res: Response) => {
-  // Close any previous transport so Protocol.connect() doesn't throw "Already connected"
-  if (sseTransport) {
-    await sseTransport.close();
-    sseTransport = null;
+// Cada requisição cria server+transport próprios, responde e FECHA na hora.
+// Sem SSE/heartbeat: a CPU só é cobrada durante o processamento da chamada.
+app.post("/mcp", express.json(), async (req: Request, res: Response) => {
+  const server = createServer();
+  const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+  res.on("close", () => {
+    transport.close();
+    server.close();
+  });
+  try {
+    await server.connect(transport);
+    await transport.handleRequest(req, res, req.body);
+  } catch (error) {
+    console.error(JSON.stringify({ event: "mcp_error", error: String(error) }));
+    if (!res.headersSent) {
+      res.status(500).json({ jsonrpc: "2.0", error: { code: -32603, message: "Internal error" }, id: null });
+    }
   }
-  sseTransport = new SSEServerTransport("/messages", res);
-  await server.connect(sseTransport);
-  // Keep connection alive — Cloud Run suspends CPU on idle SSE streams without this
-  const heartbeat = setInterval(() => res.write(": ping\n\n"), 30_000);
-  res.on("close", () => clearInterval(heartbeat));
-});
-
-app.post("/messages", express.text({ type: "application/json" }), async (req: Request, res: Response) => {
-  // Pass req.body (string) as parsedBody so handlePostMessage skips raw-body stream reading
-  await sseTransport?.handlePostMessage(req, res, req.body as string);
 });
 
 // ---------------------------------------------------------------------------
@@ -584,13 +588,11 @@ const PORT = parseInt(process.env.PORT ?? "8080", 10);
 
 app.listen(PORT, () => {
   console.log(`OpLab MCP Server — ${TOOL_REGISTRY.length} ferramentas disponíveis`);
-  console.log(`  SSE  → GET  http://localhost:${PORT}/sse`);
-  console.log(`  Msgs → POST http://localhost:${PORT}/messages?sessionId=<id>`);
+  console.log(`  MCP  → POST http://localhost:${PORT}/mcp`);
   console.log(`  Health → GET http://localhost:${PORT}/health`);
 });
 
-process.on("SIGTERM", async () => {
+process.on("SIGTERM", () => {
   console.log(JSON.stringify({ event: "shutdown" }));
-  if (sseTransport) await sseTransport.close();
   process.exit(0);
 });
