@@ -449,3 +449,13 @@ OPLAB_ACCESS_TOKEN="seu_token" npm start
 curl http://localhost:8080/health
 # Resposta esperada: {"status":"ok","tools":35,"api":"reachable"}
 ```
+
+
+---
+
+## 💰 Gestão de custos (LEIA ANTES DE FAZER DEPLOY)
+
+Este MCP roda no Google Cloud Run. Para não gerar custo elevado, siga a arquitetura
+de referência em [**COST_MANAGEMENT.md**](COST_MANAGEMENT.md): transporte **Streamable
+HTTP stateless** (nunca SSE), `--cpu-throttling`, `--min-instances=0`, `--timeout=120`.
+Regra de ouro: **conexão não pode ficar pendurada** — é o que faz a CPU ser cobrada 24/7.
