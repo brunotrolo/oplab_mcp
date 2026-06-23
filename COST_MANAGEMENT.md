@@ -1,13 +1,14 @@
-# 🏛️ Arquitetura de Referência — MCP Server no Google Cloud Run **sem sustos de custo**
+# 🏛️ Arquitetura de Referência — MCP Server no Google Cloud Run **barato e confiável**
 
 > Documento vivo, escrito a partir de um caso real: dois MCPs (OpLab e Google Sheets)
 > no Cloud Run que passaram de **~R$ 150/mês de surpresa** para **R$ 0 (dentro do free tier)**
-> — sem perder nenhuma funcionalidade. Use isto como **checklist obrigatório** ao criar
-> qualquer MCP novo. Cada regra aqui custou caro pra ser descoberta.
+> — e que só ficaram **estáveis no app do Claude** depois de acertar o padrão de servidor.
+> Use isto como **checklist obrigatório** ao criar qualquer MCP novo. Cada regra aqui
+> custou caro (em dinheiro e em dor de cabeça) pra ser descoberta.
 
 ---
 
-## 0. TL;DR — As 5 regras de ouro
+## 0. TL;DR — As 6 regras de ouro
 
 | # | Regra | Flag / Padrão |
 |---|-------|---------------|
@@ -16,8 +17,10 @@
 | 3 | **Transporte HTTP stateless** (NUNCA SSE de longa duração) | `StreamableHTTPServerTransport` |
 | 4 | **Timeout curto** (a conexão não pode ficar pendurada) | `--timeout=120` |
 | 5 | **Teto de instâncias** pra acidente não escalar | `--max-instances=2` |
+| 6 | **Servidor NOVO por requisição** (nunca compartilhado) | `createServer()` por chamada |
 
-Se seguir essas 5, um MCP de uso pessoal **cabe no free tier do Cloud Run = R$ 0**.
+Regras 1-5 fazem o MCP **caber no free tier (R$ 0)**. A regra 6 faz ele **funcionar de forma
+confiável no app do Claude** (clientes concorrentes). As duas coisas são obrigatórias.
 
 ---
 
@@ -123,14 +126,51 @@ app.listen(Number(process.env.PORT ?? 8080));
 - SDK mínimo: `@modelcontextprotocol/sdk@^1.12` (o `streamableHttp` não existe em versões < 1.10).
 - O cliente (Claude) conecta na URL terminando em **`/mcp`** (não `/sse`).
 
-### ❌ Anti-padrão (o que NÃO fazer)
+### ❌ Anti-padrões (o que NÃO fazer)
 ```ts
-// NÃO: conexão aberta a sessão inteira + heartbeat = CPU cobrada continuamente
+// 1) NÃO: conexão aberta a sessão inteira + heartbeat = CPU cobrada continuamente
 app.get("/sse", (req, res) => {
   const t = new SSEServerTransport("/messages", res);
   setInterval(() => res.write(": ping\n\n"), 30000); // 🚨 vaza dinheiro
 });
+
+// 2) NÃO: servidor ÚNICO compartilhado + close()/reconnect por requisição.
+//    Funciona em cliente sequencial (curl, Claude Code), mas QUEBRA sob
+//    requisições concorrentes (app do Claude) — race condition no connect/close.
+const mcpServer = new Server(...);          // 🚨 compartilhado
+let connected = false;
+app.post("/mcp", async (req, res) => {
+  if (connected) await mcpServer.close();   // 🚨 fecha no meio de outra requisição
+  await mcpServer.connect(transport);
+  connected = true;
+});
 ```
+
+> 💡 **Lição cara (caso real 2):** o MCP do Sheets usava o padrão 2 acima. Funcionava no
+> Claude Code (chamadas sequenciais), mas **falhava nos chats do app** (chamadas
+> concorrentes no handshake). O OpLab, com `createServer()` por requisição, sempre
+> funcionou. A correção foi alinhar o Sheets ao padrão por-requisição — validado com
+> **8 requisições concorrentes** sem erro.
+
+---
+
+## 4b. Confiabilidade & compatibilidade com clientes
+
+Nem todo cliente MCP é igual. O **Claude Code** é tolerante; o **app do Claude (chats)**
+é mais rígido e concorrente. Para funcionar nos dois:
+
+| Item | Regra | Por quê |
+|---|---|---|
+| **Servidor por requisição** | `createServer()` a cada POST | Evita race condition sob concorrência (regra de ouro 6) |
+| **serverInfo.name único** | ex.: `gs-controle-opcoes`, `oplab-oficial` | Evita confusão de registro entre múltiplos conectores |
+| **Rota `/health`** | `app.get("/health", ...)` | Health-check externo sem depender do handshake |
+| **Accept duplo** | cliente deve mandar `application/json, text/event-stream` | O SDK responde **406** se faltar um dos dois |
+| **Endpoint `/mcp`** | não `/sse` | Streamable HTTP é o transporte atual |
+
+### Ao trocar o endpoint (`/sse` → `/mcp`) ou redeployar
+No **claude.ai**: **apague o conector antigo, adicione de novo com a URL `/mcp` e abra
+uma conversa nova.** Conector velho/duplicado apontando pro `/sse` é a causa nº 1 de
+"tool not found" / "invalid request" — é problema de **cliente**, não do servidor.
 
 ---
 
@@ -155,22 +195,34 @@ Acompanhe esse número. Se ele disparar, um dos 3 vazamentos regrediu.
 ## 6. Checklist pré-deploy de um MCP novo
 
 - [ ] Transporte é **Streamable HTTP stateless** (`/mcp`), não SSE.
+- [ ] **Servidor NOVO por requisição** (`createServer()`), nunca compartilhado.
 - [ ] **Sem** `setInterval`/heartbeat mantendo conexão viva.
+- [ ] `serverInfo.name` **único** e distinto dos outros MCPs.
+- [ ] Rota **`/health`** existe.
 - [ ] Deploy com `--cpu-throttling --min-instances=0 --max-instances=N --timeout=120`.
 - [ ] Tokens/credenciais no **Secret Manager**.
 - [ ] `gcloud run services describe` confirma: `cpu-throttling=true`, `minScale=0`.
 - [ ] Teste: `curl -X POST .../mcp` com `initialize` responde e a conexão **fecha**.
+- [ ] Teste de **concorrência**: várias chamadas paralelas a `tools/list` respondem todas.
 - [ ] Métrica sec/chamada observada após 1 dia de uso real (< 5s).
+- [ ] No claude.ai: conector recriado com URL `/mcp` + conversa nova.
 
 ---
 
 ## 7. Resumo do caso real (a prova)
 
+### Custo (caso 1 — SSE/heartbeat/instance-based)
 | Métrica | Antes | Depois |
 |---|---|---|
 | CPU por chamada | ~188 s | < 1,5 s |
 | % do free tier (no mesmo uso) | ~400% (estourava) | ~3% |
 | Custo mensal projetado | ~R$ 75–150 | **R$ 0** |
-| Funcionalidade | igual | igual |
+| Custo real/dia | R$ 3–10 | **R$ 0,02–0,07** |
 
-**Os MCPs continuam funcionando exatamente igual — só pararam de sangrar.**
+### Confiabilidade (caso 2 — servidor compartilhado)
+| Sintoma | Causa | Correção |
+|---|---|---|
+| Sheets falhava nos chats, OpLab não | Servidor compartilhado + reconnect (race sob concorrência) | `createServer()` por requisição (igual OpLab) |
+| "tool not found" / "invalid request" | Conector velho/duplicado no claude.ai | Recriar conector com `/mcp` + conversa nova |
+
+**Os MCPs continuam funcionando exatamente igual — só pararam de sangrar e ficaram estáveis.**
