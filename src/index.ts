@@ -466,7 +466,7 @@ const TOOL_REGISTRY: ToolDef[] = [
   {
     name: "get_analise_manejo",
     description:
-      "Analisar manejo/rolagem de uma posição ATM/ITM (Short Put a seco ou Bull Put Spread) com o motor de 6 módulos: (1) estado atual da estrutura — gregas por perna, delta líquido, P&L, breakeven e custo de zerar hoje; (2) gerador de candidatos — calendário (mesmo strike), defensiva (delta alvo), largura nova da trava e 'manter proteção atual' quando o vencimento dela cobre o novo ciclo; (3) precificação executável — recompra a ASK, venda a BID, crédito líquido, risco máximo; (4) validação estatística — volatilidade REALIZADA + Monte Carlo (GBM, seed fixa) com P(exercício) e P(touch) reais, cross-check analítico e divergência vs delta B-S; (5) filtros de exclusão com motivo exato — crédito<=0, delta não reduz, |delta|>0,70, tendência M9/M21 contra, bid/spread/volume, IV Rank; (6) score = ROIC × theta/dia × (1−prob_MC) e decisão final ROLAR (com plano de execução) ou ASSUMIR/ENCERRAR quantificados.",
+      "Analisar manejo/rolagem de uma posição ATM/ITM (Short Put a seco ou Bull Put Spread) com o motor de 6 módulos: (1) estado atual da estrutura — gregas por perna, delta líquido, P&L, breakeven e custo de zerar hoje; (2) gerador de candidatos — calendário (mesmo strike), defensiva (delta alvo), largura nova da trava e 'manter proteção atual' quando o vencimento dela cobre o novo ciclo; (3) precificação executável — recompra a ASK, venda a BID, crédito líquido, risco máximo; (4) validação estatística — volatilidade REALIZADA + Monte Carlo (GBM, seed fixa) com P(exercício) e P(touch) reais, cross-check analítico e divergência vs delta B-S; (5) filtros de exclusão com motivo exato — crédito<=0, delta não reduz, |delta|>0,70, tendência M9/M21 contra, bid/spread/volume, IV Rank; (6) score = ROIC × theta/dia × (1−prob_MC) e decisão final ROLAR (com plano de execução) ou ASSUMIR/ENCERRAR quantificados. MODOS EXTRAS: 'posicoes' (Ajuste 11 — desmontagem agregada de várias posições); 'pernas_desmontar' (Ajuste 12/13 — desmontagem EXATA por preços informados + dimensionamento dos contratos da trava nova pelo alvo). Toda saída traz um 'snapshot' com timestamp (Ajuste 14) e alerta de timing intradiário quando o ativo cai forte no dia (Ajuste 15).",
     properties: {
       ticker:         { type: "string",  description: "Ativo subjacente (ex: VALE3)" },
       legs:           { type: "array",   description: "Pernas atuais da estrutura: [{option_ticker: 'VALES790', side: 'VENDA'|'COMPRA', quantity: 500, entry_price: 1.79}]", items: { type: "object" } },
@@ -482,8 +482,11 @@ const TOOL_REGISTRY: ToolDef[] = [
       incluir_semanais:     { type: "boolean", description: "Incluir vencimentos semanais nos candidatos (padrão: false — só mensais/3ª sexta)" },
       incluir_troca_ticker: { type: "boolean", description: "Avaliar TROCA DE TICKER quando o ativo falha ≥2/3 critérios (delta<-0,50, M9/M21<1, IV Rank<50). Padrão: true" },
       posicoes:             { type: "array",   description: "Ajuste 11 — desmontagem AGREGADA: lista de posições [{ticker, legs:[...]}]. Se informado, retorna custo de desmontagem somado + travas que recuperam o total. Ignora ticker/legs de nível superior." },
+      pernas_desmontar:     { type: "array",   description: "Ajuste 12/13 — modo DESMONTAGEM EXATA. Pernas EXATAS a desmontar com o preço atual informado pelo operador: [{option_ticker, side: 'VENDA'|'COMPRA', strike, quantity, preco_atual}]. O motor calcula o custo de desmontagem SÓ sobre estas pernas (ação inversa, nunca infere) e usa |custo| como ALVO para dimensionar quantos contratos vender na trava nova (mesmo ticker + troca). Se faltar preco_atual em alguma perna, retorna 'DADOS INCOMPLETOS'." },
+      lote:                 { type: "integer", description: "Ajuste 13 — lote para dimensionar contratos da trava nova (padrão: 1000)." },
+      queda_max_pct:        { type: "number",  description: "Ajuste 15 — limite de variação intradiária do subjacente que dispara o alerta de timing na venda de PUT (padrão: -2, i.e. queda ≥2% no dia)." },
     },
-    required: ["ticker", "legs"],
+    required: ["ticker"],
     handler: (client, a) => getAnaliseManejo(client, a),
   },
 ];

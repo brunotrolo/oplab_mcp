@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// manejo_engine.ts — Motor de Manejo/Rolagem ATM/ITM — v2 (7 ajustes)
+// manejo_engine.ts — Motor de Manejo/Rolagem ATM/ITM — v4 (15 ajustes)
 //
 // PRINCÍPIOS (spec v2):
 //  • Todo VALOR (prêmio, crédito, custo, resultado, risco) é calculado pelo CLOSE.
@@ -248,6 +248,179 @@ async function desmontarPosicao(client: AxiosInstance, ticker: string, legs: Per
   return { ticker: tk, custo_desmontar_pernas_problema: custoDesmontar, custo_estrutura_completa_liquido: custoCompleto };
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// v4 — Ajustes 12–15
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ── Ajuste 12: pernas EXATAS a desmontar, com preço informado pelo operador ────
+interface PernaDesmontar { option_ticker: string; side: "VENDA" | "COMPRA"; strike: number | null; quantity: number; preco_atual: number | null; }
+
+function normalizarPernasDesmontar(raw: unknown): PernaDesmontar[] {
+  return (Array.isArray(raw) ? raw : []).map((l): PernaDesmontar => {
+    const o = l as Record<string, unknown>;
+    const precoRaw = o.preco_atual ?? o.atual ?? o.close; // aceita "Atual" do cockpit
+    const preco = precoRaw !== undefined && precoRaw !== null && isFinite(Number(precoRaw)) ? Number(precoRaw) : null;
+    return {
+      option_ticker: String(o.option_ticker ?? "").toUpperCase(),
+      side: String(o.side ?? "").toUpperCase().startsWith("C") ? "COMPRA" as const : "VENDA" as const,
+      strike: isFinite(Number(o.strike)) ? Number(o.strike) : null,
+      quantity: Math.abs(Number(o.quantity)) || 0,
+      preco_atual: preco,
+    };
+  }).filter((l) => l.option_ticker && l.quantity > 0);
+}
+
+/** Custo de desmontagem SÓ sobre as pernas informadas, via ação inversa (nunca infere). */
+function custoDesmontagemExato(pernas: PernaDesmontar[]): { erro?: string; custo_desmontagem_liquido?: number; alvo_recuperar?: number; detalhe?: Array<Record<string, unknown>> } {
+  const faltando = pernas.filter((l) => l.preco_atual === null).map((l) => l.option_ticker);
+  if (faltando.length) return { erro: `DADOS INCOMPLETOS - perna(s) sem preco_atual: ${faltando.join(", ")}` };
+  const detalhe = pernas.map((l) => {
+    // VENDIDA → recomprar → fluxo negativo | COMPRADA → vender → fluxo positivo
+    const fluxo = round2((l.side === "VENDA" ? -1 : 1) * (l.preco_atual as number) * l.quantity);
+    return { option_ticker: l.option_ticker, side: l.side, acao: l.side === "VENDA" ? "RECOMPRAR" : "VENDER", strike: l.strike, quantity: l.quantity, preco_atual: l.preco_atual, fluxo_caixa: fluxo };
+  });
+  const custo = round2(detalhe.reduce((s, d) => s + d.fluxo_caixa, 0));
+  return { custo_desmontagem_liquido: custo, alvo_recuperar: round2(Math.abs(custo)), detalhe };
+}
+
+// ── Ajuste 13: dimensionar contratos da trava nova pelo alvo (custo de desmontagem) ──
+function dimensionarPorAlvo(credPorAcao: number, strikeV: number, strikeC: number, alvo: number, lote: number): Record<string, unknown> | null {
+  if (!(credPorAcao > 0) || !(alvo > 0)) return null;
+  const acoesNecessarias = alvo / credPorAcao;
+  const contratos = Math.max(lote, Math.round(acoesNecessarias / lote) * lote); // múltiplo do lote
+  const largura = round2(strikeV - strikeC);
+  if (!(largura > 0) || credPorAcao >= largura) return null; // trava inválida (crédito ≥ largura)
+  return {
+    contratos,
+    premio_liquido_resultante: round2(credPorAcao * contratos),
+    largura,
+    eficiencia_pct: pct1(credPorAcao / largura),
+    risco_maximo_total: round2((largura - credPorAcao) * contratos),
+    desembolso_maximo_se_exercido: round2(strikeV * contratos),
+    notional_risco: round2(strikeV * contratos),
+  };
+}
+
+// ── Ajuste 15: alerta de timing intradiário (faca caindo) ──────────────────────
+function alertaTiming(variacaoDiaPct: number | null, ladoVenda: "PUT" | "CALL", quedaMaxPct: number): string | null {
+  if (variacaoDiaPct === null || !isFinite(variacaoDiaPct)) return null;
+  if (ladoVenda === "PUT" && variacaoDiaPct <= quedaMaxPct)
+    return `ATIVO EM QUEDA FORTE HOJE (${round2(variacaoDiaPct)}%) — venda de PUT com risco de entrada pressionada; considerar aguardar estabilização.`;
+  if (ladoVenda === "CALL" && variacaoDiaPct >= Math.abs(quedaMaxPct))
+    return `ATIVO EM ALTA FORTE HOJE (+${round2(variacaoDiaPct)}%) — venda de CALL com risco de entrada pressionada; considerar aguardar estabilização.`;
+  return null;
+}
+
+function extrairVariacaoDia(stock: Record<string, unknown>): number | null {
+  const v = Number(stock.variation ?? stock.variacao ?? (stock.financial_volume as Record<string, unknown> | undefined)?.variation);
+  return isFinite(v) ? v : null;
+}
+
+/** Busca travas (Bull Put Spread) VÁLIDAS de risco definido num ticker, ordenadas por prêmio. */
+async function buscarTravasTicker(client: AxiosInstance, ticker: string, p: ManejoParams, limit = 3): Promise<Array<{ vendida: OpcaoMercado; comprada: OpcaoMercado; credPorAcao: number; largura: number; delta: number }>> {
+  const tk = ticker.toUpperCase();
+  let data: unknown = null;
+  try { data = (await client.get(`/market/instruments/series/${tk}`, { params: { bs: true, irate: 15 }, timeout: REQUEST_TIMEOUT_MS })).data; }
+  catch { return []; }
+  const allPuts = extractPutsSerie(data).filter((o) =>
+    (p.incluir_semanais || isVencimentoMensal(o.due_date)) && o.dte >= p.dte_min && o.dte <= p.dte_max && o.close !== null);
+  const candShort = allPuts.filter((o) => o.delta >= Math.max(p.delta_novo_min, -0.30) && o.delta <= p.delta_novo_max)
+    .sort((a, b) => (b.close ?? 0) - (a.close ?? 0)).slice(0, limit);
+  const out: Array<{ vendida: OpcaoMercado; comprada: OpcaoMercado; credPorAcao: number; largura: number; delta: number }> = [];
+  for (const nova of candShort) {
+    const prot = allPuts.filter((o) => o.strike < nova.strike && o.close !== null)
+      .sort((a, b) => b.strike - a.strike)
+      .find((o) => (nova.close as number) - (o.close as number) < nova.strike - o.strike) ?? null;
+    if (!prot) continue; // sem trava de risco definido ⇒ nunca venda seca
+    out.push({ vendida: nova, comprada: prot, credPorAcao: round4((nova.close as number) - (prot.close as number)), largura: round2(nova.strike - prot.strike), delta: nova.delta });
+  }
+  return out;
+}
+
+// ── Modo v4: desmontar pernas EXATAS + dimensionar trava de recuperação pelo alvo ──
+async function desmontarEDimensionar(client: AxiosInstance, args: Record<string, unknown>, p: ManejoParams): Promise<unknown> {
+  const timestamp = new Date().toISOString();
+  const lote = Math.max(1, Number(args.lote) || 1000);
+  const quedaMax = isFinite(Number(args.queda_max_pct)) ? Number(args.queda_max_pct) : -2;
+
+  // ── Ajuste 12: custo exato (nunca infere pernas nem preços) ──
+  const pernas = normalizarPernasDesmontar(args.pernas_desmontar);
+  if (pernas.length === 0) throw new Error("pernas_desmontar: [{option_ticker, side, strike, quantity, preco_atual}]");
+  const custo = custoDesmontagemExato(pernas);
+  if (custo.erro) {
+    return { modo: "DESMONTAGEM_EXATA", snapshot: { timestamp }, desmontagem: { status: custo.erro }, disclaimer: "Informe preco_atual de todas as pernas." };
+  }
+  const alvo = custo.alvo_recuperar as number;
+
+  // Universo de candidatos: ticker informado (mesmo ativo) + troca de ticker na whitelist
+  const tickerBase = p.ticker || "";
+  const [mesmasRes, trocaRes, stockBaseRes] = await Promise.allSettled([
+    tickerBase ? buscarTravasTicker(client, tickerBase, p, 3) : Promise.resolve([]),
+    p.incluir_troca_ticker ? avaliarTrocaTicker(client, p, alvo, alvo, tickerBase ? [tickerBase] : []) : Promise.resolve({ disponivel: false }),
+    tickerBase ? client.get(`/market/stocks/${tickerBase}`, { timeout: REQUEST_TIMEOUT_MS }) : Promise.resolve(null),
+  ]);
+
+  const candidatos: Array<Record<string, unknown>> = [];
+
+  // (a) Mesmo ticker
+  if (mesmasRes.status === "fulfilled" && Array.isArray(mesmasRes.value)) {
+    const varDia = stockBaseRes.status === "fulfilled" && stockBaseRes.value ? extrairVariacaoDia((stockBaseRes.value as { data: Record<string, unknown> }).data) : null;
+    for (const t of mesmasRes.value) {
+      const dim = dimensionarPorAlvo(t.credPorAcao, t.vendida.strike, t.comprada.strike, alvo, lote);
+      if (!dim) continue;
+      candidatos.push({
+        origem: "MESMO_TICKER", ticker: tickerBase, estrutura: "BULL_PUT_SPREAD", vencimento: t.vendida.due_date, dte: t.vendida.dte,
+        vendida: { symbol: t.vendida.symbol, strike: t.vendida.strike, delta: round4(t.vendida.delta), close: t.vendida.close },
+        comprada_protecao: { symbol: t.comprada.symbol, strike: t.comprada.strike, delta: round4(t.comprada.delta), close: t.comprada.close },
+        credito_liquido_por_acao: t.credPorAcao, ...dim,
+        delta_na_faixa: Math.abs(t.delta) >= 0.15 && Math.abs(t.delta) <= 0.30,
+        alerta_timing: alertaTiming(varDia, "PUT", quedaMax),
+      });
+    }
+  }
+
+  // (b) Troca de ticker — redimensiona os candidatos da avaliação pelo alvo
+  const troca = trocaRes.status === "fulfilled" ? trocaRes.value as { candidatos?: Array<Record<string, unknown>> } : null;
+  if (troca && Array.isArray(troca.candidatos)) {
+    for (const c of troca.candidatos) {
+      const v = c.vendida as Record<string, unknown>, pr = c.comprada_protecao as Record<string, unknown>;
+      const credPorAcao = Number(c.premio_liquido_por_acao);
+      const dim = dimensionarPorAlvo(credPorAcao, Number(v.strike), Number(pr.strike), alvo, lote);
+      if (!dim) continue;
+      candidatos.push({
+        origem: "TROCA_TICKER", ticker: c.ticker, iv_rank: c.iv_rank, m9m21: c.m9m21, spot: c.spot, estrutura: "BULL_PUT_SPREAD", vencimento: c.vencimento, dte: c.dte,
+        vendida: { symbol: v.symbol, strike: v.strike, delta: v.delta, close: v.close },
+        comprada_protecao: { symbol: pr.symbol, strike: pr.strike, delta: pr.delta, close: pr.close },
+        credito_liquido_por_acao: round4(credPorAcao), ...dim,
+        delta_na_faixa: Math.abs(Number(v.delta)) >= 0.15 && Math.abs(Number(v.delta)) <= 0.30,
+        alerta_timing: alertaTiming(Number(c.variacao_dia_pct ?? NaN), "PUT", quedaMax),
+      });
+    }
+  }
+
+  // Ordenar: menos contratos p/ atingir o alvo, depois maior eficiência (Ajuste 13)
+  candidatos.sort((a, b) => (Number(a.contratos) - Number(b.contratos)) || (Number(b.eficiencia_pct) - Number(a.eficiencia_pct)));
+
+  return {
+    modo: "DESMONTAGEM_EXATA",
+    base_calculo: "Custo de desmontagem pelos preços informados (Ajuste 12). Candidatos de trava dimensionados pelo CLOSE (Ajuste 13). Motor não avalia patrimônio.",
+    snapshot: {
+      timestamp, ticker_base: tickerBase || null,
+      spot: stockBaseRes.status === "fulfilled" && stockBaseRes.value ? round2(Number((stockBaseRes.value as { data: Record<string, unknown> }).data.close)) : null,
+      aviso: `Plano baseado no snapshot ${timestamp}. Revalidar preços no book antes de enviar a ordem — o mercado se move.`,
+    },
+    desmontagem: {
+      custo_desmontagem_liquido: custo.custo_desmontagem_liquido,
+      alvo_recuperar: alvo,
+      detalhe: custo.detalhe,
+      obs: "Custo calculado SÓ sobre as pernas informadas (ação inversa). Este é o alvo de prêmio líquido que a trava nova precisa gerar.",
+    },
+    candidatos_dimensionados: candidatos,
+    nota: `Cada candidato foi dimensionado para gerar ~R$ ${alvo} de prêmio líquido (lote ${lote}). Ordenados por menor nº de contratos + maior eficiência. Filtros: trava de risco definido (crédito < largura), delta -0,15/-0,30, IV Rank>50 e M9/M21≥1 na troca.`,
+    disclaimer: "Valores pelo CLOSE/preços informados (não é execução). Não é recomendação de investimento.",
+  };
+}
+
 // ── TROCA_TICKER (Ajuste 3) ───────────────────────────────────────────────────
 
 async function avaliarTrocaTicker(
@@ -265,14 +438,14 @@ async function avaliarTrocaTicker(
   const topIV = ivRanking.slice(0, 6);
 
   // 2) Tendência (M9/M21 ≥ 1) via get_stock, só para os top IV
-  const comTendencia: Array<{ ticker: string; iv_rank: number; spot: number; m9m21: number }> = [];
+  const comTendencia: Array<{ ticker: string; iv_rank: number; spot: number; m9m21: number; variacaoDia: number | null }> = [];
   const stocks = await Promise.allSettled(topIV.map((r) => client.get(`/market/stocks/${r.ticker}`, { timeout: REQUEST_TIMEOUT_MS })));
   stocks.forEach((res, i) => {
     if (res.status !== "fulfilled") return;
     const o = res.value.data as Record<string, unknown>;
     const spot = Number(o.close ?? o.bid ?? o.spot_price);
     const m9m21 = Number((o.m9_m21 as Record<string, unknown> | undefined)?.value);
-    if (isFinite(spot) && spot > 0 && isFinite(m9m21) && m9m21 >= 1.0) comTendencia.push({ ticker: topIV[i].ticker, iv_rank: topIV[i].iv_rank, spot, m9m21 });
+    if (isFinite(spot) && spot > 0 && isFinite(m9m21) && m9m21 >= 1.0) comTendencia.push({ ticker: topIV[i].ticker, iv_rank: topIV[i].iv_rank, spot, m9m21, variacaoDia: extrairVariacaoDia(o) });
   });
   if (comTendencia.length === 0) return { disponivel: true, candidatos: [], nota: "Nenhum ativo da whitelist com IV Rank>50 E tendência de alta agora." };
 
@@ -311,6 +484,7 @@ async function avaliarTrocaTicker(
     const valeATroca = premioLiqAcao > 0 && eficiencia >= 0.25 && ciclosRecuperacao !== null && ciclosRecuperacao <= CICLOS_MAX && Math.abs(nova.delta) <= 0.30 && t.iv_rank > p.iv_rank_min && t.m9m21 >= 1.0;
     migracoes.push({
       ticker: t.ticker, iv_rank: round2(t.iv_rank), m9m21: round2(t.m9m21), spot: round2(t.spot),
+      variacao_dia_pct: t.variacaoDia, alerta_timing: alertaTiming(t.variacaoDia, "PUT", -2),
       estrutura: "BULL_PUT_SPREAD", vencimento: nova.due_date, dte: nova.dte, qty_equivalente: qtyEquiv,
       vendida: { symbol: nova.symbol, strike: nova.strike, delta: round4(nova.delta), close: nova.close, liquidez_ref: { bid: nova.bid, ask: nova.ask, volume: nova.volume } },
       comprada_protecao: { symbol: prot.symbol, strike: prot.strike, delta: round4(prot.delta), close: prot.close, liquidez_ref: { bid: prot.bid, ask: prot.ask, volume: prot.volume } },
@@ -327,6 +501,11 @@ async function avaliarTrocaTicker(
 export async function getAnaliseManejo(client: AxiosInstance, args: Record<string, unknown>): Promise<unknown> {
   const p = normalizarManejoParams(args);
   const alertas: string[] = [];
+
+  // ── Ajuste 12+13+14+15: modo desmontagem EXATA (pernas + preços informados) ───
+  if (Array.isArray(args.pernas_desmontar) && args.pernas_desmontar.length > 0) {
+    return desmontarEDimensionar(client, args, p);
+  }
 
   // ── Ajuste 11: DESMONTAGEM AGREGADA de múltiplas posições ────────────────────
   if (Array.isArray(args.posicoes) && args.posicoes.length > 0) {
@@ -345,6 +524,7 @@ export async function getAnaliseManejo(client: AxiosInstance, args: Record<strin
     return {
       modo: "DESMONTAGEM_AGREGADA",
       base_calculo: "Cálculo pelo CLOSE. bid/ask/volume só liquidez. Motor não avalia patrimônio.",
+      snapshot: { timestamp: new Date().toISOString(), aviso: "Plano baseado neste snapshot. Revalidar preços no book antes de enviar a ordem — o mercado se move." },
       posicoes: custos,
       agregado: { custo_desmontar_pernas_problema_total: somaDesmontar, custo_estrutura_completa_liquido_total: somaCompleto },
       candidatos_recuperacao: recuperacao,
@@ -385,6 +565,11 @@ export async function getAnaliseManejo(client: AxiosInstance, args: Record<strin
   const m9m21 = Number((stock.m9_m21 as Record<string, unknown> | undefined)?.value);
   const ivImplicita = Number(stock.iv_current);
   if (!isFinite(spot) || spot <= 0) throw new Error(`Spot inválido para ${p.ticker}`);
+  // ── Ajuste 15: alerta de timing intradiário (faca caindo) — rolagem vende PUT ──
+  const variacaoDia = extrairVariacaoDia(stock);
+  const quedaMaxPct = isFinite(Number(args.queda_max_pct)) ? Number(args.queda_max_pct) : -2;
+  const alertaTimingDia = alertaTiming(variacaoDia, "PUT", quedaMaxPct);
+  if (alertaTimingDia) alertas.push(alertaTimingDia);
 
   const puts = extractPutsSerie(serieRes.value.data);
   if (puts.length === 0) throw new Error(`Nenhuma PUT na série de ${p.ticker}`);
@@ -589,9 +774,20 @@ export async function getAnaliseManejo(client: AxiosInstance, args: Record<strin
           "Reavaliar no próximo pregão: novo book/série pode reabrir candidato a crédito.",
         ] };
 
+  const snapshotTs = new Date().toISOString();
+
   return {
     ticker: p.ticker,
     base_calculo: "Cálculo baseado no CLOSE. Execução a validar no book vivo do próximo pregão. bid/ask/volume são referência de liquidez apenas.",
+    // ── Ajuste 14: snapshot congelado com timestamp ──
+    snapshot: {
+      timestamp: snapshotTs,
+      spot: round2(spot),
+      variacao_dia_pct: variacaoDia,
+      pernas: pernas.map((l) => ({ option_ticker: l.option_ticker, close: l.mercado?.close ?? "INDISPONÍVEL" })),
+      alerta_timing: alertaTimingDia,
+      aviso: `Plano baseado no snapshot ${snapshotTs}. Revalidar preços no book antes de enviar a ordem — o mercado se move.`,
+    },
     parametros: p,
     mercado: {
       spot: round2(spot), m9_m21: isFinite(m9m21) ? round2(m9m21) : null, tendencia: isFinite(m9m21) ? (m9m21 >= 1 ? "ALTA" : "BAIXA") : "n/d",
