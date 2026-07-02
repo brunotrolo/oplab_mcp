@@ -7,6 +7,7 @@ import { getIVRankHistorico, getIVRankBulk, normalizarPeriodo } from "./utils/iv
 import { getBacktestProtocolo2, runQuantBacktest } from "./utils/backtest_engine.js";
 import { getSmartMoneyTracker } from "./utils/smart_money_tracker.js";
 import { getOportunidadesMensais } from "./utils/opportunity_engine.js";
+import { getAnaliseManejo } from "./utils/manejo_engine.js";
 
 // ---------------------------------------------------------------------------
 // OpLab API client
@@ -459,6 +460,28 @@ const TOOL_REGISTRY: ToolDef[] = [
     },
     required: [],
     handler: (client, a) => getSmartMoneyTracker(client, a),
+  },
+
+  // ── Motor de Manejo/Rolagem ATM-ITM ─────────────────────────────────────────
+  {
+    name: "get_analise_manejo",
+    description:
+      "Analisar manejo/rolagem de uma posição ATM/ITM (Short Put a seco ou Bull Put Spread) com o motor de 6 módulos: (1) estado atual da estrutura — gregas por perna, delta líquido, P&L, breakeven e custo de zerar hoje; (2) gerador de candidatos — calendário (mesmo strike), defensiva (delta alvo), largura nova da trava e 'manter proteção atual' quando o vencimento dela cobre o novo ciclo; (3) precificação executável — recompra a ASK, venda a BID, crédito líquido, risco máximo; (4) validação estatística — volatilidade REALIZADA + Monte Carlo (GBM, seed fixa) com P(exercício) e P(touch) reais, cross-check analítico e divergência vs delta B-S; (5) filtros de exclusão com motivo exato — crédito<=0, delta não reduz, |delta|>0,70, tendência M9/M21 contra, bid/spread/volume, IV Rank; (6) score = ROIC × theta/dia × (1−prob_MC) e decisão final ROLAR (com plano de execução) ou ASSUMIR/ENCERRAR quantificados.",
+    properties: {
+      ticker:         { type: "string",  description: "Ativo subjacente (ex: VALE3)" },
+      legs:           { type: "array",   description: "Pernas atuais da estrutura: [{option_ticker: 'VALES790', side: 'VENDA'|'COMPRA', quantity: 500, entry_price: 1.79}]", items: { type: "object" } },
+      dte_min:        { type: "integer", description: "DTE mínimo do novo vencimento (padrão: 20)" },
+      dte_max:        { type: "integer", description: "DTE máximo do novo vencimento (padrão: 75)" },
+      delta_novo_min: { type: "number",  description: "Delta mais negativo aceito na nova vendida (padrão: -0.35)" },
+      delta_novo_max: { type: "number",  description: "Delta menos negativo aceito na nova vendida (padrão: -0.15)" },
+      iv_rank_min:    { type: "number",  description: "IV Rank mínimo para vender vol (padrão: 50)" },
+      spread_max_pct: { type: "number",  description: "Spread bid/ask máximo em % do mid (padrão: 15)" },
+      volume_min:     { type: "integer", description: "Volume mínimo em contratos da nova opção (padrão: 100)" },
+      hist_days:      { type: "integer", description: "Janela da volatilidade realizada em pregões (padrão: 90)" },
+      mc_paths:       { type: "integer", description: "Trajetórias do Monte Carlo, 2000-50000 (padrão: 10000)" },
+    },
+    required: ["ticker", "legs"],
+    handler: (client, a) => getAnaliseManejo(client, a),
   },
 ];
 
