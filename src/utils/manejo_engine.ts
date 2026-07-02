@@ -289,9 +289,15 @@ async function avaliarTrocaTicker(
     if (candShort.length === 0) return;
     candShort.sort((a, b) => (b.close ?? 0) - (a.close ?? 0));
     const nova = candShort[0];
-    // ── Ajuste 10: FECHA A TRAVA — proteção comprada no strike imediatamente abaixo ──
-    const prot = allPuts.filter((o) => o.strike < nova.strike && o.close !== null).sort((a, b) => b.strike - a.strike)[0] ?? null;
-    if (!prot) return; // sem proteção viável ⇒ não sugere venda seca (filosofia do operador)
+    // ── Ajuste 10: FECHA A TRAVA — proteção comprada mais OTM, formando trava de risco DEFINIDO ──
+    // Percorre os strikes abaixo (do mais próximo ao mais OTM) e escolhe a 1ª proteção que
+    // gera uma trava VÁLIDA: crédito < largura (risco máx positivo). Se crédito ≥ largura, o
+    // "spread" é artefato de close ilíquido/defasado (lucro sem risco, impossível) e é pulado.
+    const candProt = allPuts
+      .filter((o) => o.strike < nova.strike && o.close !== null)
+      .sort((a, b) => b.strike - a.strike);
+    const prot = candProt.find((o) => (nova.close as number) - (o.close as number) < nova.strike - o.strike) ?? null;
+    if (!prot) return; // sem trava viável de risco definido ⇒ não sugere venda seca (filosofia do operador)
     const qtyEquiv = Math.max(1, Math.round(desembolsoDoente / nova.strike)); // mesmo capital alocado
     const premioLiqAcao = round4((nova.close as number) - (prot.close as number));
     const largura = round2(nova.strike - prot.strike);
