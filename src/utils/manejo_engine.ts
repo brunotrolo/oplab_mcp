@@ -213,12 +213,48 @@ export function normalizarManejoParams(a: Record<string, unknown>): ManejoParams
   };
 }
 
+function normalizarLegs(legsRaw: unknown): PernaInput[] {
+  return (Array.isArray(legsRaw) ? legsRaw : []).map((l): PernaInput => {
+    const o = l as Record<string, unknown>;
+    return {
+      option_ticker: String(o.option_ticker ?? "").toUpperCase(),
+      side: String(o.side ?? "").toUpperCase() === "COMPRA" ? "COMPRA" as const : "VENDA" as const,
+      quantity: Math.abs(Number(o.quantity)) || 0, entry_price: Number(o.entry_price) || 0,
+    };
+  }).filter((l) => l.option_ticker && l.quantity > 0);
+}
+
+// ── Ajuste 11: custo de desmontagem de UMA posição (para agregação) ───────────
+async function desmontarPosicao(client: AxiosInstance, ticker: string, legs: PernaInput[]): Promise<Record<string, unknown>> {
+  const tk = ticker.toUpperCase();
+  const [serieRes, chainRes] = await Promise.allSettled([
+    client.get(`/market/instruments/series/${tk}`, { params: { bs: true, irate: 15 }, timeout: REQUEST_TIMEOUT_MS }),
+    client.get(`/market/options/${tk}`, { timeout: REQUEST_TIMEOUT_MS }),
+  ]);
+  if (serieRes.status !== "fulfilled") return { ticker: tk, erro: "série indisponível" };
+  const puts = extractPutsSerie(serieRes.value.data);
+  const chain = chainRes.status === "fulfilled" ? parseChain(chainRes.value.data) : new Map();
+  for (const o of puts) { const c = chain.get(o.symbol); if (c && o.close === null && c.close > 0) o.close = c.close; }
+  const bySym = new Map(puts.map((o) => [o.symbol, o]));
+  const V = legs.filter((l) => l.side === "VENDA"), C = legs.filter((l) => l.side === "COMPRA");
+  const closeOf = (l: PernaInput) => bySym.get(l.option_ticker)?.close ?? null;
+  if (V.some((l) => closeOf(l) === null)) return { ticker: tk, erro: "sem close em perna vendida" };
+  const doenteStrike = Math.max(...V.map((l) => bySym.get(l.option_ticker)?.strike ?? 0));
+  const protPar = C.filter((l) => (bySym.get(l.option_ticker)?.strike ?? Infinity) < doenteStrike)
+    .sort((a, b) => (bySym.get(b.option_ticker)!.strike) - (bySym.get(a.option_ticker)!.strike))[0] ?? null;
+  const custoDesmontar = round2(V.reduce((s, l) => s + (closeOf(l) as number) * l.quantity, 0) - (protPar && closeOf(protPar) !== null ? (closeOf(protPar) as number) * protPar.quantity : 0));
+  const custoCompleto = C.every((l) => closeOf(l) !== null)
+    ? round2(V.reduce((s, l) => s + (closeOf(l) as number) * l.quantity, 0) - C.reduce((s, l) => s + (closeOf(l) as number) * l.quantity, 0)) : null;
+  return { ticker: tk, custo_desmontar_pernas_problema: custoDesmontar, custo_estrutura_completa_liquido: custoCompleto };
+}
+
 // ── TROCA_TICKER (Ajuste 3) ───────────────────────────────────────────────────
 
 async function avaliarTrocaTicker(
-  client: AxiosInstance, p: ManejoParams, prejuizoRealizado: number, desembolsoDoente: number
+  client: AxiosInstance, p: ManejoParams, prejuizoRealizado: number, desembolsoDoente: number, excluir: string[] = [p.ticker]
 ): Promise<unknown> {
-  const candidatosAtivos = WHITELIST_24.filter((t) => t !== p.ticker);
+  const exSet = new Set(excluir.map((t) => t.toUpperCase()));
+  const candidatosAtivos = WHITELIST_24.filter((t) => !exSet.has(t));
   // 1) IV Rank de toda a whitelist numa tacada (batched + cache)
   let ivRanking: Array<{ ticker: string; iv_rank: number }> = [];
   try {
@@ -247,32 +283,36 @@ async function avaliarTrocaTicker(
   series.forEach((res, i) => {
     if (res.status !== "fulfilled") return;
     const t = alvos[i];
-    const puts = extractPutsSerie(res.value.data).filter((o) =>
-      (p.incluir_semanais || isVencimentoMensal(o.due_date)) &&
-      o.dte >= p.dte_min && o.dte <= p.dte_max &&
-      o.delta >= Math.max(p.delta_novo_min, -0.30) && o.delta <= p.delta_novo_max &&
-      o.close !== null);
-    if (puts.length === 0) return;
-    puts.sort((a, b) => (b.close ?? 0) - (a.close ?? 0)); // melhor prêmio por close
-    const nova = puts[0];
-    // qty equivalente pelo mesmo capital de desembolso da posição atual
-    const qtyEquiv = Math.max(1, Math.round(desembolsoDoente / nova.strike));
-    const premioPorCiclo = round2((nova.close ?? 0) * qtyEquiv);
-    const probSucesso = 1 - Math.abs(nova.delta); // aproximação risco-neutro
-    const premioAjustado = premioPorCiclo * probSucesso;  // prêmio esperado por ciclo
-    // ciclos p/ recuperar o prejuízo com o prêmio AJUSTADO pela prob. de sucesso
+    const allPuts = extractPutsSerie(res.value.data).filter((o) =>
+      (p.incluir_semanais || isVencimentoMensal(o.due_date)) && o.dte >= p.dte_min && o.dte <= p.dte_max && o.close !== null);
+    const candShort = allPuts.filter((o) => o.delta >= Math.max(p.delta_novo_min, -0.30) && o.delta <= p.delta_novo_max);
+    if (candShort.length === 0) return;
+    candShort.sort((a, b) => (b.close ?? 0) - (a.close ?? 0));
+    const nova = candShort[0];
+    // ── Ajuste 10: FECHA A TRAVA — proteção comprada no strike imediatamente abaixo ──
+    const prot = allPuts.filter((o) => o.strike < nova.strike && o.close !== null).sort((a, b) => b.strike - a.strike)[0] ?? null;
+    if (!prot) return; // sem proteção viável ⇒ não sugere venda seca (filosofia do operador)
+    const qtyEquiv = Math.max(1, Math.round(desembolsoDoente / nova.strike)); // mesmo capital alocado
+    const premioLiqAcao = round4((nova.close as number) - (prot.close as number));
+    const largura = round2(nova.strike - prot.strike);
+    const eficiencia = largura > 0 ? premioLiqAcao / largura : 0; // crédito ÷ largura (filtro ≥25%)
+    const premioLiqTotal = round2(premioLiqAcao * qtyEquiv);
+    const riscoMax = round2((largura - premioLiqAcao) * qtyEquiv);
+    const probSucesso = 1 - Math.abs(nova.delta);
+    const premioAjustado = premioLiqTotal * probSucesso; // prêmio LÍQUIDO esperado por ciclo
     const ciclosRecuperacao = premioAjustado > 0 ? round2(Math.abs(prejuizoRealizado) / premioAjustado) : null;
-    const CICLOS_MAX = 3; // vale a troca se recupera em até ~3 ciclos, com setup bom
-    const valeATroca = ciclosRecuperacao !== null && ciclosRecuperacao <= CICLOS_MAX && Math.abs(nova.delta) <= 0.30 && t.iv_rank > p.iv_rank_min && t.m9m21 >= 1.0;
+    const CICLOS_MAX = 3;
+    const valeATroca = premioLiqAcao > 0 && eficiencia >= 0.25 && ciclosRecuperacao !== null && ciclosRecuperacao <= CICLOS_MAX && Math.abs(nova.delta) <= 0.30 && t.iv_rank > p.iv_rank_min && t.m9m21 >= 1.0;
     migracoes.push({
       ticker: t.ticker, iv_rank: round2(t.iv_rank), m9m21: round2(t.m9m21), spot: round2(t.spot),
-      nova_vendida: nova.symbol, strike: nova.strike, delta: round4(nova.delta), close_premio: nova.close, dte: nova.dte, vencimento: nova.due_date,
-      qty_equivalente: qtyEquiv, premio_por_ciclo: premioPorCiclo, ciclos_para_recuperar: ciclosRecuperacao,
-      prob_sucesso_aprox_pct: pct1(probSucesso), vale_a_troca: valeATroca,
-      liquidez_ref: { bid: nova.bid, ask: nova.ask, volume: nova.volume },
+      estrutura: "BULL_PUT_SPREAD", vencimento: nova.due_date, dte: nova.dte, qty_equivalente: qtyEquiv,
+      vendida: { symbol: nova.symbol, strike: nova.strike, delta: round4(nova.delta), close: nova.close, liquidez_ref: { bid: nova.bid, ask: nova.ask, volume: nova.volume } },
+      comprada_protecao: { symbol: prot.symbol, strike: prot.strike, delta: round4(prot.delta), close: prot.close, liquidez_ref: { bid: prot.bid, ask: prot.ask, volume: prot.volume } },
+      premio_liquido_por_acao: premioLiqAcao, premio_liquido_total: premioLiqTotal, largura, eficiencia_pct: pct1(eficiencia), risco_maximo_total: riscoMax,
+      premio_por_ciclo: premioLiqTotal, ciclos_para_recuperar: ciclosRecuperacao, prob_sucesso_aprox_pct: pct1(probSucesso), vale_a_troca: valeATroca,
     });
   });
-  migracoes.sort((a, b) => Number(b.premio_por_ciclo) - Number(a.premio_por_ciclo));
+  migracoes.sort((a, b) => Number(b.premio_liquido_total) - Number(a.premio_liquido_total));
   return { disponivel: true, prejuizo_a_recuperar: round2(Math.abs(prejuizoRealizado)), candidatos: migracoes };
 }
 
@@ -281,6 +321,32 @@ async function avaliarTrocaTicker(
 export async function getAnaliseManejo(client: AxiosInstance, args: Record<string, unknown>): Promise<unknown> {
   const p = normalizarManejoParams(args);
   const alertas: string[] = [];
+
+  // ── Ajuste 11: DESMONTAGEM AGREGADA de múltiplas posições ────────────────────
+  if (Array.isArray(args.posicoes) && args.posicoes.length > 0) {
+    const posicoes = (args.posicoes as unknown[]).map((x) => {
+      const o = x as Record<string, unknown>;
+      return { ticker: String(o.ticker ?? "").toUpperCase(), legs: normalizarLegs(o.legs) };
+    }).filter((x) => x.ticker && x.legs.length);
+    if (posicoes.length === 0) throw new Error("posicoes: cada item precisa de {ticker, legs:[...]}");
+    const custos = await Promise.all(posicoes.map((x) => desmontarPosicao(client, x.ticker, x.legs)));
+    const somaDesmontar = round2(custos.reduce((s, c) => s + (typeof c.custo_desmontar_pernas_problema === "number" ? c.custo_desmontar_pernas_problema : 0), 0));
+    const somaCompleto = round2(custos.reduce((s, c) => s + (typeof c.custo_estrutura_completa_liquido === "number" ? c.custo_estrutura_completa_liquido : 0), 0));
+    const excluir = posicoes.map((x) => x.ticker);
+    const desembolsoRef = Math.max(...custos.map((c) => Math.abs(typeof c.custo_desmontar_pernas_problema === "number" ? c.custo_desmontar_pernas_problema : 0)), somaDesmontar);
+    const paramsAgg = { ...p, ticker: excluir[0] };
+    const recuperacao = await avaliarTrocaTicker(client, paramsAgg, somaDesmontar, desembolsoRef, excluir);
+    return {
+      modo: "DESMONTAGEM_AGREGADA",
+      base_calculo: "Cálculo pelo CLOSE. bid/ask/volume só liquidez. Motor não avalia patrimônio.",
+      posicoes: custos,
+      agregado: { custo_desmontar_pernas_problema_total: somaDesmontar, custo_estrutura_completa_liquido_total: somaCompleto },
+      candidatos_recuperacao: recuperacao,
+      nota: "Candidatos são travas (Bull Put Spread) que recuperam o custo agregado de desmontagem em ≤3 ciclos, com IV Rank>50, M9/M21≥1, delta -0,15/-0,30 e eficiência ≥25%.",
+      disclaimer: "Valores pelo CLOSE (não é execução). Não é recomendação de investimento.",
+    };
+  }
+
   if (!p.ticker) throw new Error("Parâmetro obrigatório: ticker (ex: VALE3)");
   if (p.legs.length === 0) throw new Error("Parâmetro obrigatório: legs — [{option_ticker, side, quantity, entry_price}]");
 
@@ -354,11 +420,24 @@ export async function getAnaliseManejo(client: AxiosInstance, args: Record<strin
   const plEstruturaTotal = round2(pernas.reduce((s, l) => s + (l.pl_total ?? 0), 0));
   const legsPayoff = pernas.filter((l) => l.mercado).map((l) => ({ side: l.side, strike: l.mercado!.strike, quantity: l.quantity, entry: l.entry_price }));
   const { piorPerda, melhorGanho } = extremosEstrutura(legsPayoff);
-  // Custo de zerar hoje pelo CLOSE (recompra vendidas, vende compradas), por perna
-  const semCloseZerar = [...vendidas, ...compradas].some((l) => l.mercado!.close === null);
-  const custoZerarTotal = semCloseZerar ? null : round2(
-    vendidas.reduce((s, l) => s + (l.mercado!.close as number) * l.quantity, 0) -
-    compradas.reduce((s, l) => s + (l.mercado!.close as number) * l.quantity, 0));
+  // ── Ajuste 8: DOIS custos de desmontagem (CLOSE), rotulados + detalhe por perna ──
+  const cx = (l: PernaEstado) => l.mercado!.close as number;
+  const fluxo = (l: PernaEstado) => round2((l.side === "VENDA" ? -1 : 1) * cx(l) * l.quantity); // caixa: recompra vendida=−, vende comprada=+
+  // (a) Zerar a ESTRUTURA COMPLETA (líquido): recompra TODAS vendidas − vende TODAS compradas (credita long puts ITM valiosas).
+  const semCloseCompleto = [...vendidas, ...compradas].some((l) => l.mercado!.close === null);
+  const custoEstruturaCompleta = semCloseCompleto ? null : round2(
+    vendidas.reduce((s, l) => s + cx(l) * l.quantity, 0) - compradas.reduce((s, l) => s + cx(l) * l.quantity, 0));
+  const detalheCompleto = [...vendidas, ...compradas].filter((l) => l.mercado!.close !== null).map((l) => ({
+    option_ticker: l.option_ticker, acao: l.side === "VENDA" ? "RECOMPRAR" : "VENDER", close: cx(l), quantity: l.quantity, fluxo_caixa: fluxo(l) }));
+  // (b) Desmontar só as PERNAS-PROBLEMA: recompra as vendidas + vende SÓ a proteção pareada (não credita as long puts ITM valiosas).
+  const semCloseDesmontar = vendidas.some((l) => l.mercado!.close === null) || (!!protecaoPar && protecaoPar.mercado!.close === null);
+  const custoDesmontarPernas = semCloseDesmontar ? null : round2(
+    vendidas.reduce((s, l) => s + cx(l) * l.quantity, 0) - (protecaoPar ? cx(protecaoPar) * protecaoPar.quantity : 0));
+  const detalheDesmontar = [...vendidas, ...(protecaoPar ? [protecaoPar] : [])].filter((l) => l.mercado!.close !== null).map((l) => ({
+    option_ticker: l.option_ticker, acao: l.side === "VENDA" ? "RECOMPRAR" : "VENDER (proteção pareada)", close: cx(l), quantity: l.quantity, fluxo_caixa: fluxo(l) }));
+  void custoEstruturaCompleta;
+  // Âncora de decisão (Ajuste 9): custo presente de desmontar as pernas-problema.
+  const custoAncora = custoDesmontarPernas ?? custoEstruturaCompleta;
 
   const mcAtual = temVolReal ? monteCarloCruzarStrike(spot, doente.mercado!.strike, volReal, doente.mercado!.dte, p.mc_paths, 42) : null;
 
@@ -482,7 +561,7 @@ export async function getAnaliseManejo(client: AxiosInstance, args: Record<strin
   const falhas = [deltaAtualAbs > 0.50, isFinite(m9m21) && m9m21 < 1.0, ivRank !== null && ivRank < 50].filter(Boolean).length;
   let trocaTicker: unknown = { avaliado: false, motivo: falhas < 2 ? `ativo saudável (${falhas}/3 critérios ruins) — troca não acionada` : "desativado por parâmetro" };
   if (p.incluir_troca_ticker && falhas >= 2) {
-    const prejuizo = custoZerarTotal !== null ? -custoZerarTotal : plEstruturaTotal; // custo de sair (negativo) ou P&L atual
+    const prejuizo = custoAncora !== null ? custoAncora : 0; // Ajuste 9: âncora = custo presente de desmontar (não o P&L de montagem)
     trocaTicker = { avaliado: true, gatilho: `${falhas}/3 critérios ruins (delta>${0.50}? ${deltaAtualAbs > 0.5} | M9M21<1? ${isFinite(m9m21) && m9m21 < 1} | IVRank<50? ${ivRank !== null && ivRank < 50})`, ...(await avaliarTrocaTicker(client, p, prejuizo, doente.mercado!.strike * qty) as object) };
   }
 
@@ -495,11 +574,13 @@ export async function getAnaliseManejo(client: AxiosInstance, args: Record<strin
           ...(vencedor.nova_comprada ? [`${protecaoPar && !vencedor.mantem_protecao_atual ? 4 : 3}. COMPRAR (abrir) ${qty} ${vencedor.nova_comprada.symbol} — ref. CLOSE R$ ${vencedor.nova_comprada.close}`] : []),
           `Crédito líquido esperado ~R$ ${vencedor.credito_liquido_total} | novo BE R$ ${vencedor.breakeven_novo}. Validar no book vivo do próximo pregão.`,
         ] }
-    : { acao: "NAO_ROLAR — avaliar ASSUMIR / ENCERRAR / TROCA DE TICKER", candidato: null, racional: `Nenhum candidato de rolagem sobreviveu (${candidatos.length} avaliados — ver motivo_eliminacao). ${(trocaTicker as { avaliado?: boolean }).avaliado ? "Avalie o bloco troca_ticker abaixo." : ""}`,
+    : { acao: "NAO_ROLAR — avaliar ASSUMIR / ENCERRAR / TROCA DE TICKER", candidato: null,
+        racional: `Nenhuma rolagem a crédito sobreviveu (${candidatos.length} avaliados). Âncora da decisão = custo PRESENTE de desmontar as pernas-problema R$ ${custoDesmontarPernas ?? "INDISPONÍVEL"} (não o P&L de montagem). ${(trocaTicker as { avaliado?: boolean }).avaliado ? "Veja troca_ticker abaixo." : ""}`,
         plano_execucao: [
-          custoZerarTotal !== null ? `ENCERRAR: zerar hoje custa ~R$ ${custoZerarTotal} (ref. CLOSE).` : "ENCERRAR: custo INDISPONÍVEL (falta close em alguma perna).",
+          custoEstruturaCompleta !== null ? `ENCERRAR estrutura completa (líquido): ~R$ ${custoEstruturaCompleta} (credita as long puts ITM).` : "ENCERRAR completo: INDISPONÍVEL.",
+          custoDesmontarPernas !== null ? `DESMONTAR só as pernas-problema (âncora): ~R$ ${custoDesmontarPernas} (recompra vendidas + vende só a proteção pareada).` : "DESMONTAR pernas-problema: INDISPONÍVEL.",
           `ASSUMIR: exercício da ${doente.option_ticker} = comprar ${qty} ${p.ticker} a R$ ${doente.mercado!.strike} (R$ ${round2(doente.mercado!.strike * qty)}); pior perda da estrutura R$ ${piorPerda}.`,
-          "Reavaliar no próximo pregão: novo book ou série pode reabrir candidato a crédito.",
+          "Reavaliar no próximo pregão: novo book/série pode reabrir candidato a crédito.",
         ] };
 
   return {
@@ -523,7 +604,8 @@ export async function getAnaliseManejo(client: AxiosInstance, args: Record<strin
       largura_trava: larguraAtual,
       pl_estrutura_total_close: plEstruturaTotal,
       pior_perda_no_vencimento: piorPerda, melhor_ganho_no_vencimento: melhorGanho,
-      custo_zerar_hoje_total: custoZerarTotal ?? "INDISPONÍVEL",
+      custo_zerar_estrutura_completa_liquido: { total: custoEstruturaCompleta ?? "INDISPONÍVEL", detalhe: detalheCompleto },
+      custo_desmontar_pernas_problema: { total: custoDesmontarPernas ?? "INDISPONÍVEL", detalhe: detalheDesmontar, obs: "Âncora de decisão (Ajuste 9): custo presente que compete com rolar/trocar." },
       desembolso_maximo_se_exercido: round2(vendidas.reduce((s, l) => s + l.mercado!.strike * l.quantity, 0) - compradas.reduce((s, l) => s + l.mercado!.strike * l.quantity, 0)),
       divergencia_delta_vs_real: mcAtual ? { delta_bs_pct: pct1(deltaAtualAbs), prob_real_mc_pct: pct1(mcAtual.prob_terminal), prob_touch_mc_pct: pct1(mcAtual.prob_touch),
         leitura: Math.abs(mcAtual.prob_terminal - deltaAtualAbs) > 0.05 ? "Delta diverge do risco real — confiar no Monte Carlo" : "Delta consistente com o histórico" } : null,

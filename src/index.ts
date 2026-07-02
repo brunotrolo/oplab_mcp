@@ -481,6 +481,7 @@ const TOOL_REGISTRY: ToolDef[] = [
       mc_paths:       { type: "integer", description: "Trajetórias do Monte Carlo, 2000-50000 (padrão: 10000)" },
       incluir_semanais:     { type: "boolean", description: "Incluir vencimentos semanais nos candidatos (padrão: false — só mensais/3ª sexta)" },
       incluir_troca_ticker: { type: "boolean", description: "Avaliar TROCA DE TICKER quando o ativo falha ≥2/3 critérios (delta<-0,50, M9/M21<1, IV Rank<50). Padrão: true" },
+      posicoes:             { type: "array",   description: "Ajuste 11 — desmontagem AGREGADA: lista de posições [{ticker, legs:[...]}]. Se informado, retorna custo de desmontagem somado + travas que recuperam o total. Ignora ticker/legs de nível superior." },
     },
     required: ["ticker", "legs"],
     handler: (client, a) => getAnaliseManejo(client, a),
