@@ -250,7 +250,7 @@ async function avaliarTrocaTicker(
     const puts = extractPutsSerie(res.value.data).filter((o) =>
       (p.incluir_semanais || isVencimentoMensal(o.due_date)) &&
       o.dte >= p.dte_min && o.dte <= p.dte_max &&
-      o.delta >= p.delta_novo_min && o.delta <= p.delta_novo_max &&
+      o.delta >= Math.max(p.delta_novo_min, -0.30) && o.delta <= p.delta_novo_max &&
       o.close !== null);
     if (puts.length === 0) return;
     puts.sort((a, b) => (b.close ?? 0) - (a.close ?? 0)); // melhor prêmio por close
@@ -258,9 +258,12 @@ async function avaliarTrocaTicker(
     // qty equivalente pelo mesmo capital de desembolso da posição atual
     const qtyEquiv = Math.max(1, Math.round(desembolsoDoente / nova.strike));
     const premioPorCiclo = round2((nova.close ?? 0) * qtyEquiv);
-    const ciclosRecuperacao = premioPorCiclo > 0 ? round2(Math.abs(prejuizoRealizado) / premioPorCiclo) : null;
     const probSucesso = 1 - Math.abs(nova.delta); // aproximação risco-neutro
-    const valeATroca = premioPorCiclo * probSucesso > (Math.abs(prejuizoRealizado) / (ciclosRecuperacao ?? Infinity)) && Math.abs(nova.delta) <= 0.30 && t.iv_rank > p.iv_rank_min && t.m9m21 >= 1.0;
+    const premioAjustado = premioPorCiclo * probSucesso;  // prêmio esperado por ciclo
+    // ciclos p/ recuperar o prejuízo com o prêmio AJUSTADO pela prob. de sucesso
+    const ciclosRecuperacao = premioAjustado > 0 ? round2(Math.abs(prejuizoRealizado) / premioAjustado) : null;
+    const CICLOS_MAX = 3; // vale a troca se recupera em até ~3 ciclos, com setup bom
+    const valeATroca = ciclosRecuperacao !== null && ciclosRecuperacao <= CICLOS_MAX && Math.abs(nova.delta) <= 0.30 && t.iv_rank > p.iv_rank_min && t.m9m21 >= 1.0;
     migracoes.push({
       ticker: t.ticker, iv_rank: round2(t.iv_rank), m9m21: round2(t.m9m21), spot: round2(t.spot),
       nova_vendida: nova.symbol, strike: nova.strike, delta: round4(nova.delta), close_premio: nova.close, dte: nova.dte, vencimento: nova.due_date,
