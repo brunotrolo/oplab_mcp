@@ -231,10 +231,11 @@ const MIN_DIAS_CONFIAVEL = 126;
 /** Whitelist padrão de 24 ativos líquidos para o bulk. */
 export const WHITELIST_24 = [
   "B3SA3", "BBAS3", "BBDC4", "BRAV3", "BRKM5", "CMIG4",
-  "CMIN3", "COGN3", "CSAN3", "CSNA3", "DIRR3", "EMBJ3",
-  "FLRY3", "GGBR4", "ITSA4", "ITUB4", "NATU3", "PETR4",
-  "PRIO3", "PSSA3", "SANB11", "SUZB3", "USIM5", "VALE3",
-];
+  "CMIN3", "COGN3", "CPLE6", "CSAN3", "CSNA3", "DIRR3",
+  "ELET3", "EMBJ3", "FLRY3", "GGBR4", "ITSA4", "ITUB4",
+  "NATU3", "PETR4", "PRIO3", "PSSA3", "SANB11", "SUZB3",
+  "USIM5", "VALE3", "WEGE3",
+]; // 27 ativos (whitelist atualizada)
 
 const PERIODOS_VALIDOS = [21, 63, 126, 252];
 

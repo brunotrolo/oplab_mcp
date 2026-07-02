@@ -479,6 +479,8 @@ const TOOL_REGISTRY: ToolDef[] = [
       volume_min:     { type: "integer", description: "Volume mínimo em contratos da nova opção (padrão: 100)" },
       hist_days:      { type: "integer", description: "Janela da volatilidade realizada em pregões (padrão: 90)" },
       mc_paths:       { type: "integer", description: "Trajetórias do Monte Carlo, 2000-50000 (padrão: 10000)" },
+      incluir_semanais:     { type: "boolean", description: "Incluir vencimentos semanais nos candidatos (padrão: false — só mensais/3ª sexta)" },
+      incluir_troca_ticker: { type: "boolean", description: "Avaliar TROCA DE TICKER quando o ativo falha ≥2/3 critérios (delta<-0,50, M9/M21<1, IV Rank<50). Padrão: true" },
     },
     required: ["ticker", "legs"],
     handler: (client, a) => getAnaliseManejo(client, a),
