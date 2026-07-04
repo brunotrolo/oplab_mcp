@@ -8,6 +8,7 @@ import { getBacktestProtocolo2, runQuantBacktest } from "./utils/backtest_engine
 import { getSmartMoneyTracker } from "./utils/smart_money_tracker.js";
 import { getOportunidadesMensais } from "./utils/opportunity_engine.js";
 import { getAnaliseManejo } from "./utils/manejo_engine.js";
+import { getAnaliseEstrutura } from "./utils/estrutura_engine.js";
 
 // ---------------------------------------------------------------------------
 // OpLab API client
@@ -488,6 +489,17 @@ const TOOL_REGISTRY: ToolDef[] = [
     },
     required: ["ticker"],
     handler: (client, a) => getAnaliseManejo(client, a),
+  },
+  {
+    name: "get_analise_estrutura",
+    description:
+      "Analisar a ESTRUTURA de preço de um ticker a partir do OHLC histórico e classificar a FASE atual (ALTA / BAIXA / LATERAL / TRANSIÇÃO), antecipando viradas que o M9/M21 confirma tarde. Entrega números crus e determinísticos — NÃO dá sinal de compra/venda nem prevê o futuro, só classificação factual da estrutura. Calcula: swings (últimos 3 topos/fundos, pivôs janela 3), fundos/topos ascendentes, fase por janelas de 15 candles (amplitude<4%=LATERAL, inclinação>3%=ALTA, <-3%=BAIXA), rompimento vs máx/mín de 20 candles (com pct), confirmação por volume (último vs média 20d), flag TRANSIÇÃO (fase anterior lateral + rompimento recente + volume confirma) com direção, e contexto M9/M21 com dias de antecipação da estrutura vs o cruzamento das médias. Mesmas regras do get_analise_manejo: pelo close a qualquer hora, sem gerenciar patrimônio, determinístico.",
+    properties: {
+      symbol:        { type: "string",  description: "Código do ativo (ex: PSSA3). OBRIGATÓRIO." },
+      lookback_days: { type: "integer", description: "Janela de histórico em dias corridos (padrão: 90; mínimo efetivo 30 candles)." },
+    },
+    required: ["symbol"],
+    handler: (client, a) => getAnaliseEstrutura(client, a),
   },
 ];
 
