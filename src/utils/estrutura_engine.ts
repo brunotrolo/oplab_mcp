@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// estrutura_engine.ts — get_analise_estrutura
+// estrutura_engine.ts — get_analise_estrutura + classificador PURO reutilizável
 //
 // Classifica a FASE de preço de um ticker a partir do OHLC histórico real
 // (ALTA / BAIXA / LATERAL / TRANSIÇÃO), antecipando viradas que o M9/M21 confirma
@@ -8,6 +8,10 @@
 //  • cálculo pelo close/OHLC, a qualquer hora;
 //  • não gerencia patrimônio/strike/concentração;
 //  • mesma entrada ⇒ mesma saída sempre.
+//
+// A função `classificarEstrutura(candles)` é PURA e é a ÚNICA fonte da lógica:
+// o get_backtest_estrutural a reusa passando candles.slice(0, entryIdx+1) —
+// garantindo, por construção, ZERO look-ahead bias no backtest.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { AxiosInstance } from "axios";
@@ -16,19 +20,45 @@ const REQUEST_TIMEOUT_MS = 25_000;
 const round2 = (n: number) => Math.round(n * 100) / 100;
 const round4 = (n: number) => Math.round(n * 10_000) / 10_000;
 
-interface Candle { time: number; open: number; high: number; low: number; close: number; volume: number; }
+export interface EstruturaCandle { time: number; open: number; high: number; low: number; close: number; volume: number; }
 interface Pivot { index: number; value: number; }
 
-function parseCandles(raw: unknown): Candle[] {
+export interface EstruturaResult {
+  fase_atual: string;
+  fundos_ascendentes: boolean;
+  topos_ascendentes: boolean;
+  estrutura_tendencia: string;
+  ultimos_topos: Array<{ index: number; value: number }>;
+  ultimos_fundos: Array<{ index: number; value: number }>;
+  rompeu_alta: boolean;
+  rompeu_baixa: boolean;
+  pct_rompimento: number;
+  volume_confirma: boolean;
+  vol_ultimo: number;
+  vol_media_20d: number;
+  transicao_detectada: boolean;
+  transicao_direcao: string | null;
+  m9: number | null;
+  m21: number | null;
+  m9m21_ratio: number | null;
+  dias_antecipacao: number | null;
+  fase_recente: { fase: string; amplitude: number; inclinacao: number };
+  fase_anterior: { fase: string; amplitude: number; inclinacao: number };
+  candles_analisados: number;
+}
+
+export function parseCandlesEstrutura(raw: unknown): EstruturaCandle[] {
   const obj = raw as Record<string, unknown> | undefined;
   const arr = Array.isArray(raw) ? raw : Array.isArray(obj?.data) ? (obj!.data as unknown[]) : [];
-  const out: Candle[] = [];
+  const out: EstruturaCandle[] = [];
   for (const c of arr) {
     const o = c as Record<string, unknown>;
     const close = Number(o.close), high = Number(o.high), low = Number(o.low), open = Number(o.open), vol = Number(o.volume), time = Number(o.time);
     if (isFinite(close) && close > 0 && isFinite(high) && isFinite(low))
       out.push({ time: isFinite(time) ? time : 0, open: isFinite(open) ? open : close, high, low, close, volume: isFinite(vol) ? vol : 0 });
   }
+  // ordena cronologicamente (defensivo — a API já vem ordenada)
+  out.sort((a, b) => a.time - b.time);
   return out;
 }
 
@@ -41,7 +71,7 @@ function sma(arr: number[], period: number, endIdx: number): number | null {
 }
 
 /** Pivôs com janela k: candle i é topo se high[i] > vizinhos nos k lados. */
-function swingHighs(c: Candle[], k = 3): Pivot[] {
+function swingHighs(c: EstruturaCandle[], k = 3): Pivot[] {
   const out: Pivot[] = [];
   for (let i = k; i < c.length - k; i++) {
     let ok = true;
@@ -50,7 +80,7 @@ function swingHighs(c: Candle[], k = 3): Pivot[] {
   }
   return out;
 }
-function swingLows(c: Candle[], k = 3): Pivot[] {
+function swingLows(c: EstruturaCandle[], k = 3): Pivot[] {
   const out: Pivot[] = [];
   for (let i = k; i < c.length - k; i++) {
     let ok = true;
@@ -61,7 +91,7 @@ function swingLows(c: Candle[], k = 3): Pivot[] {
 }
 
 /** Fase de uma janela [start,end): LATERAL se amplitude<4%; ALTA se incl>3%; BAIXA se <−3%. */
-function faseWindow(c: Candle[], start: number, end: number): { fase: string; amplitude: number; inclinacao: number } {
+function faseWindow(c: EstruturaCandle[], start: number, end: number): { fase: string; amplitude: number; inclinacao: number } {
   const seg = c.slice(Math.max(0, start), end);
   const closes = seg.map((x) => x.close);
   const max = Math.max(...seg.map((x) => x.high));
@@ -78,22 +108,14 @@ function faseWindow(c: Candle[], start: number, end: number): { fase: string; am
   return { fase, amplitude: round2(amplitude), inclinacao: round2(inclinacao) };
 }
 
-export async function getAnaliseEstrutura(client: AxiosInstance, args: Record<string, unknown>): Promise<unknown> {
-  const symbol = String(args.symbol ?? "").toUpperCase();
-  if (!symbol) throw new Error("Parâmetro obrigatório: symbol (ex: PSSA3)");
-  const lookback = Math.max(30, Math.round(Number(args.lookback_days) || 90));
-
-  const to = new Date();
-  const from = new Date(to.getTime() - lookback * 86_400_000);
-  const fmt = (d: Date) => d.toISOString().slice(0, 10);
-
-  let raw: unknown = null;
-  try { raw = (await client.get(`/market/historical/${symbol}/1d`, { params: { from: fmt(from), to: fmt(to) }, timeout: REQUEST_TIMEOUT_MS })).data; }
-  catch { return { erro: "DADOS INCOMPLETOS" }; }
-
-  const candles = parseCandles(raw);
-  if (candles.length < 30) return { erro: "DADOS INCOMPLETOS" };
-
+/**
+ * Núcleo PURO da classificação estrutural. Recebe candles em ordem cronológica e
+ * trata o ÚLTIMO candle como "hoje". Passar candles.slice(0, i+1) reconstrói o
+ * estado estrutural como era no candle i — base do backtest sem look-ahead.
+ * Retorna null se houver < 30 candles.
+ */
+export function classificarEstrutura(candles: EstruturaCandle[]): EstruturaResult | null {
+  if (candles.length < 30) return null;
   const n = candles.length;
   const closes = candles.map((c) => c.close);
   const highs = candles.map((c) => c.high);
@@ -152,34 +174,42 @@ export async function getAnaliseEstrutura(client: AxiosInstance, args: Record<st
     let crossIdx: number | null = null;
     for (let i = 21; i < n; i++) {
       const a9p = sma(closes, 9, i - 1), a21p = sma(closes, 21, i - 1), a9 = sma(closes, 9, i), a21 = sma(closes, 21, i);
-      if (a9p !== null && a21p !== null && a9 !== null && a21 !== null && a9p <= a21p && a9 > a21) crossIdx = i; // guarda o cruzamento de alta mais recente
+      if (a9p !== null && a21p !== null && a9 !== null && a21 !== null && a9p <= a21p && a9 > a21) crossIdx = i; // cruzamento de alta mais recente
     }
     if (crossIdx !== null && crossIdx >= ascIdx) dias_antecipacao = crossIdx - ascIdx;
   }
 
   return {
+    fase_atual, fundos_ascendentes, topos_ascendentes, estrutura_tendencia,
+    ultimos_topos, ultimos_fundos,
+    rompeu_alta, rompeu_baixa, pct_rompimento,
+    volume_confirma, vol_ultimo, vol_media_20d,
+    transicao_detectada, transicao_direcao,
+    m9: m9 !== null ? round2(m9) : null, m21: m21 !== null ? round2(m21) : null, m9m21_ratio, dias_antecipacao,
+    fase_recente: recent, fase_anterior: mid, candles_analisados: n,
+  };
+}
+
+export async function getAnaliseEstrutura(client: AxiosInstance, args: Record<string, unknown>): Promise<unknown> {
+  const symbol = String(args.symbol ?? "").toUpperCase();
+  if (!symbol) throw new Error("Parâmetro obrigatório: symbol (ex: PSSA3)");
+  const lookback = Math.max(30, Math.round(Number(args.lookback_days) || 90));
+
+  const to = new Date();
+  const from = new Date(to.getTime() - lookback * 86_400_000);
+  const fmt = (d: Date) => d.toISOString().slice(0, 10);
+
+  let raw: unknown = null;
+  try { raw = (await client.get(`/market/historical/${symbol}/1d`, { params: { from: fmt(from), to: fmt(to) }, timeout: REQUEST_TIMEOUT_MS })).data; }
+  catch { return { erro: "DADOS_INCOMPLETOS", motivo: "falha ao buscar histórico OHLC" }; }
+
+  const candles = parseCandlesEstrutura(raw);
+  const res = classificarEstrutura(candles);
+  if (!res) return { erro: "DADOS_INCOMPLETOS", motivo: `histórico insuficiente (${candles.length} candles; mínimo 30)` };
+
+  return {
     symbol,
-    fase_atual,
-    fundos_ascendentes,
-    topos_ascendentes,
-    estrutura_tendencia,
-    ultimos_topos,
-    ultimos_fundos,
-    rompeu_alta,
-    rompeu_baixa,
-    pct_rompimento,
-    volume_confirma,
-    vol_ultimo,
-    vol_media_20d,
-    transicao_detectada,
-    transicao_direcao,
-    m9: m9 !== null ? round2(m9) : null,
-    m21: m21 !== null ? round2(m21) : null,
-    m9m21_ratio,
-    dias_antecipacao,
-    fase_recente: recent,
-    fase_anterior: mid,
-    candles_analisados: n,
+    ...res,
     snapshot_timestamp: new Date().toISOString(),
     base_calculo: "Estrutura de preço pelo OHLC/close. Classificação factual — não é sinal de compra/venda nem previsão. Motor não avalia patrimônio.",
   };

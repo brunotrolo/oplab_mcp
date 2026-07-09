@@ -9,6 +9,7 @@ import { getSmartMoneyTracker } from "./utils/smart_money_tracker.js";
 import { getOportunidadesMensais } from "./utils/opportunity_engine.js";
 import { getAnaliseManejo } from "./utils/manejo_engine.js";
 import { getAnaliseEstrutura } from "./utils/estrutura_engine.js";
+import { getBacktestEstrutural } from "./utils/backtest_estrutural_engine.js";
 
 // ---------------------------------------------------------------------------
 // OpLab API client
@@ -500,6 +501,20 @@ const TOOL_REGISTRY: ToolDef[] = [
     },
     required: ["symbol"],
     handler: (client, a) => getAnaliseEstrutura(client, a),
+  },
+  {
+    name: "get_backtest_estrutural",
+    description:
+      "Backtest EMPÍRICO: filtrar entradas pela ESTRUTURA de preço melhora o win rate sobre o baseline? Para cada ticker e cada ciclo mensal, reconstrói o estado estrutural (mesma lógica de get_analise_estrutura) usando SÓ candles até a data de entrada (ZERO look-ahead), simula a venda de PUT/trava com a cadeia de opções histórica real, apura no vencimento e compara COORTES (baseline, apenas_iv, apenas_m9m21, apenas_alta_estrutural, alta_estrutural_e_iv, apenas_transicao, rompimento_com_volume, full_stack) por win rate, P&L médio, desvio-padrão e sharpe simplificado. Veredito: ESTRUTURA_TEM_EDGE (lift ≥5pp e n≥30), ESTRUTURA_SEM_EDGE ou AMOSTRA_INSUFICIENTE. Determinístico. Não é sinal de compra/venda.",
+    properties: {
+      tickers:        { type: "array",   description: "Lista de códigos (ex: [\"VALE3\",\"PSSA3\"]). Se omitido, usa a whitelist padrão de 24 ativos." },
+      lookback_meses: { type: "integer", description: "Janela de histórico em meses (padrão: 24; teto 24)." },
+      dte_alvo:       { type: "integer", description: "DTE da entrada simulada (padrão: 25)." },
+      delta_alvo:     { type: "number",  description: "Delta alvo da PUT vendida (padrão: -0.25)." },
+      use_spread:     { type: "boolean", description: "Simular trava Bull Put Spread (perda limitada) em vez de PUT seca. Padrão: true." },
+    },
+    required: [],
+    handler: (client, a) => getBacktestEstrutural(client, a),
   },
 ];
 

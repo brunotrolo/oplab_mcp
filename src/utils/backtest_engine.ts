@@ -99,12 +99,12 @@ export interface BacktestParams {
   periodo_dias: number;
 }
 
-interface Candle {
+export interface Candle {
   date: string;
   close: number;
 }
 
-interface OptionRow {
+export interface OptionRow {
   type: string;
   strike: number;
   premium: number;
@@ -113,7 +113,7 @@ interface OptionRow {
   due_date: string;
 }
 
-interface SimOp {
+export interface SimOp {
   ticker: string;
   entrada_date: string;
   expiry_date: string;
@@ -188,7 +188,7 @@ export interface BacktestResult {
 
 // ── Parsing das respostas da OpLab ────────────────────────────────────────────
 
-function extractCandles(raw: unknown): Candle[] {
+export function extractCandles(raw: unknown): Candle[] {
   const obj = raw as Record<string, unknown> | undefined;
   const rows = Array.isArray(raw) ? raw : obj && Array.isArray(obj.data) ? (obj.data as unknown[]) : [];
   return rows
@@ -204,7 +204,7 @@ function extractCandles(raw: unknown): Candle[] {
 }
 
 /** Normaliza a cadeia de opções de um dia em OptionRow[]. */
-function extractOptions(raw: unknown): OptionRow[] {
+export function extractOptions(raw: unknown): OptionRow[] {
   const rows = Array.isArray(raw) ? raw : [];
   return rows
     .map((row): OptionRow => {
@@ -235,7 +235,7 @@ function sma(values: number[], end: number, window: number): number {
  * Constrói, por índice de candle, a vol_21d anualizada e o IV Rank histórico
  * (rank da vol_21d do dia dentro da janela móvel de 252 valores anteriores).
  */
-function buildIndicators(closes: number[]): { vol21: number[]; ivRank: number[]; m9m21: number[] } {
+export function buildIndicators(closes: number[]): { vol21: number[]; ivRank: number[]; m9m21: number[] } {
   const retornos = calcRetornosLog(closes);
   const vol21 = closes.map((_, j) => (j >= 21 ? calcVolatilidade21d(retornos, j - 1) : NaN));
 
@@ -257,7 +257,7 @@ function buildIndicators(closes: number[]): { vol21: number[]; ivRank: number[];
 
 // ── Seleção da PUT candidata ──────────────────────────────────────────────────
 
-function selectPut(chain: OptionRow[], p: BacktestParams): OptionRow | null {
+export function selectPut(chain: OptionRow[], p: BacktestParams): OptionRow | null {
   const candidatas = chain.filter(
     (o) =>
       o.dte >= p.dte_min &&
@@ -283,7 +283,7 @@ function selectPut(chain: OptionRow[], p: BacktestParams): OptionRow | null {
  * strike mais próximo de (strike_vendido - spread_width), abaixo do strike vendido.
  * Usa os prêmios reais da cadeia (sem modelagem teórica).
  */
-function selectProtective(chain: OptionRow[], sold: OptionRow, spreadWidth: number): OptionRow | null {
+export function selectProtective(chain: OptionRow[], sold: OptionRow, spreadWidth: number): OptionRow | null {
   const alvo = sold.strike - spreadWidth;
   const protecoes = chain.filter(
     (o) => o.due_date === sold.due_date && o.strike < sold.strike && o.premium >= 0 && isFinite(o.strike)
@@ -301,7 +301,7 @@ function selectProtective(chain: OptionRow[], sold: OptionRow, spreadWidth: numb
  * - BULL_PUT_SPREAD (use_spread): vende a PUT e compra a proteção. P/L limitado:
  *   ganho máx = prêmio líquido; perda máx = (largura efetiva - prêmio líquido) × 100.
  */
-function simulate(
+export function simulate(
   ticker: string,
   entradaDate: string,
   opt: OptionRow,
