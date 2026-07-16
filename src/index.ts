@@ -4,6 +4,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import axios, { AxiosInstance } from "axios";
 import { getIVRankHistorico, getIVRankBulk, normalizarPeriodo, sincronizarWhitelist } from "./utils/iv_calculator.js";
+import { precificarLocalSePossivel } from "./utils/bs_engine.js";
 import { getBacktestProtocolo2, runQuantBacktest } from "./utils/backtest_engine.js";
 import { getSmartMoneyTracker } from "./utils/smart_money_tracker.js";
 import { getOportunidadesMensais } from "./utils/opportunity_engine.js";
@@ -94,7 +95,7 @@ const TOOL_REGISTRY: ToolDef[] = [
   },
   {
     name: "get_options_bs",
-    description: "Calcular Black-Scholes de uma opção: retorna prêmio teórico, gregas e volatilidade implícita dados os parâmetros informados.",
+    description: "Calcular Black-Scholes de uma opção: prêmio teórico, gregas e volatilidade. WHAT-IF: se você informar spotprice + strike + vol + prazo (dtm ou duedate) + type, o cálculo é feito LOCALMENTE por fórmula fechada (modelo europeu, validado contra Hull) usando EXATAMENTE esses valores — porque o endpoint OpLab ignora spotprice/vol quando recebe o symbol de uma opção (e erra 500 no modo ação). Sem esses inputs, faz passthrough para o endpoint (preço de mercado da opção). O campo 'metodo' indica qual caminho foi usado.",
     properties: {
       symbol:    { type: "string",  description: "Código da opção (ex: PETRH245)" },
       irate:     { type: "number",  description: "Taxa de juros em % (ex: 10.75)" },
@@ -108,7 +109,7 @@ const TOOL_REGISTRY: ToolDef[] = [
       amount:    { type: "integer", description: "Quantidade de ativos" },
     },
     required: ["symbol", "irate"],
-    build: (a) => ({ path: "/market/options/bs", params: pick(a, ["symbol", "irate", "type", "spotprice", "strike", "premium", "dtm", "vol", "duedate", "amount"]) }),
+    handler: (client, a) => getOptionsBs(client, a),
   },
   {
     name: "get_options_powders",
@@ -512,6 +513,7 @@ const TOOL_REGISTRY: ToolDef[] = [
       dte_alvo:       { type: "integer", description: "DTE da entrada simulada (padrão: 25)." },
       delta_alvo:     { type: "number",  description: "Delta alvo da PUT vendida (padrão: -0.25)." },
       use_spread:     { type: "boolean", description: "Simular trava Bull Put Spread (perda limitada) em vez de PUT seca. Padrão: true." },
+      incluir_operacoes: { type: "boolean", description: "Se true, adiciona ao resultado a lista 'operacoes' com CADA trade individual (data de entrada, strike, prêmio, delta, DTE, vencimento, spot no vencimento, resultado, P&L e flags point-in-time). Para auditoria/reconstrução independente. Padrão: false." },
     },
     required: [],
     handler: (client, a) => getBacktestEstrutural(client, a),
@@ -540,6 +542,17 @@ async function withRetry<T>(fn: () => Promise<T>, attempts = 3): Promise<T> {
     }
   }
   throw new Error("unreachable");
+}
+
+// get_options_bs: calcula Black-Scholes LOCALMENTE quando o chamador fornece os
+// inputs auto-contidos (spotprice, strike, vol, prazo, tipo) — porque o endpoint
+// OpLab ignora spotprice/vol com symbol de opção e erra 500 no modo ação. Sem esses
+// inputs, faz passthrough para o endpoint (comportamento original de mercado).
+async function getOptionsBs(client: AxiosInstance, a: Record<string, unknown>): Promise<unknown> {
+  const local = precificarLocalSePossivel(a);
+  if (local) return local;
+  const params = pick(a, ["symbol", "irate", "type", "spotprice", "strike", "premium", "dtm", "vol", "duedate", "amount"]);
+  return await withRetry(async () => (await client.get("/market/options/bs", { params })).data);
 }
 
 // Static tool list derived from TOOL_REGISTRY — returned verbatim by ListTools

@@ -55,6 +55,16 @@ interface EntryOp {
   transicao_direcao: string | null;
   m9m21_ratio: number | null;
   iv_rank: number; // NaN se ainda sem janela
+  // detalhe da operação (para auditoria/reconstrução independente via incluir_operacoes)
+  strike: number;
+  premio_entrada: number;
+  delta: number;
+  dte: number;
+  expiry_date: string;
+  use_spread: boolean;
+  strike_protecao: number | null;
+  premio_protecao: number | null;
+  spot_vencimento: number;
   // resultado (usa spot futuro APENAS para apurar, nunca para decidir)
   resultado: "WIN" | "LOSS";
   pl: number;
@@ -69,6 +79,7 @@ interface EstruturalParams {
   dte_alvo: number;
   delta_alvo: number;
   use_spread: boolean;
+  incluir_operacoes: boolean;
 }
 
 function normalizar(a: Record<string, unknown>): EstruturalParams {
@@ -79,6 +90,7 @@ function normalizar(a: Record<string, unknown>): EstruturalParams {
     dte_alvo: Math.max(7, Math.round(num(a.dte_alvo, 25))),
     delta_alvo: num(a.delta_alvo, -0.25),
     use_spread: a.use_spread === undefined ? true : Boolean(a.use_spread),
+    incluir_operacoes: Boolean(a.incluir_operacoes),
   };
 }
 
@@ -168,6 +180,15 @@ async function backtestTickerEstrutural(client: AxiosInstance, ticker: string, p
       transicao_direcao: est.transicao_direcao,
       m9m21_ratio: est.m9m21_ratio,
       iv_rank: ind.ivRank[di],
+      strike: sim.strike,
+      premio_entrada: sim.premio_entrada,
+      delta: sim.delta,
+      dte: sim.dte,
+      expiry_date: sim.expiry_date,
+      use_spread: protecao !== null,
+      strike_protecao: (sim as unknown as { strike_protecao?: number }).strike_protecao ?? null,
+      premio_protecao: (sim as unknown as { premio_protecao?: number }).premio_protecao ?? null,
+      spot_vencimento: sim.spot_vencimento,
       resultado: sim.resultado,
       pl: sim.pl,
     });
@@ -255,6 +276,21 @@ export async function getBacktestEstrutural(client: AxiosInstance, args: Record<
     return { ticker, n_operacoes: ops.length, win_rate_pct: ops.length ? round1((wins / ops.length) * 100) : 0, pl_total: round2(ops.reduce((s, o) => s + o.pl, 0)) };
   }).sort((a, b) => b.pl_total - a.pl_total);
 
+  // ── operações individuais (opt-in) — para auditoria/reconstrução independente ──
+  // Default OFF: sem mudança no output existente. Cada op traz TODOS os inputs da
+  // decisão de entrada + o resultado, para reconstrução por scripts/backtest_oracle.py.
+  const operacoes = p.incluir_operacoes
+    ? all.map((o) => ({
+        ticker: o.ticker, entrada_date: o.date, expiry_date: o.expiry_date,
+        strike: o.strike, premio_entrada: o.premio_entrada, delta: o.delta, dte: o.dte,
+        use_spread: o.use_spread, strike_protecao: o.strike_protecao, premio_protecao: o.premio_protecao,
+        spot_vencimento: o.spot_vencimento, resultado: o.resultado, pl: o.pl,
+        // flags point-in-time (só dados até a entrada) — para checar a decisão
+        estrutura_tendencia: o.estrutura_tendencia, iv_rank: isFinite(o.iv_rank) ? round1(o.iv_rank) : null,
+        m9m21_ratio: o.m9m21_ratio,
+      }))
+    : undefined;
+
   const hoje = new Date();
   const inicio = new Date(hoje.getTime() - Math.round(p.lookback_meses * 30.4) * DAY_MS);
   const result = {
@@ -264,6 +300,7 @@ export async function getBacktestEstrutural(client: AxiosInstance, args: Record<
     coortes,
     conclusao: { melhor_coorte, lift_vs_baseline_pp, amostra_suficiente, veredito },
     por_ticker,
+    ...(operacoes ? { operacoes } : {}),
     alertas,
     snapshot_timestamp: new Date().toISOString(),
     base_calculo: "Backtest determinístico sobre OHLC + cadeia de opções histórica. ZERO look-ahead: estrutura e indicadores reconstruídos só com dados até a entrada. Coortes = subconjuntos do mesmo baseline. Não é sinal de compra/venda.",
