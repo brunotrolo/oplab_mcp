@@ -14,6 +14,7 @@
 // ---------------------------------------------------------------------------
 
 import { AxiosInstance } from "axios";
+import { WHITELIST_FALLBACK, fetchWhitelistCSV } from "./whitelist_source.js";
 
 // ── Funções matemáticas puras (sem dependências além de Math) ───────────────
 
@@ -228,14 +229,42 @@ export interface IVRankResult {
  */
 const MIN_DIAS_CONFIAVEL = 126;
 
-/** Whitelist padrão de 24 ativos líquidos para o bulk. */
-export const WHITELIST_24 = [
-  "B3SA3", "BBAS3", "BBDC4", "BRAV3", "BRKM5", "CMIG4",
-  "CMIN3", "COGN3", "CPLE6", "CSAN3", "CSNA3", "DIRR3",
-  "ELET3", "EMBJ3", "FLRY3", "GGBR4", "ITSA4", "ITUB4",
-  "NATU3", "PETR4", "PRIO3", "PSSA3", "SANB11", "SUZB3",
-  "USIM5", "VALE3", "WEGE3",
-]; // 27 ativos (whitelist atualizada)
+// Whitelist padrão (fallback quando `tickers` não é informado). É um array MUTÁVEL
+// que começa igual ao WHITELIST_FALLBACK (espelho manual da aba DADOS_ATIVOS) e pode
+// ser atualizado IN-PLACE por sincronizarWhitelist() a partir do CSV da planilha.
+// Mantemos o nome WHITELIST_24 e a MESMA referência de array de propósito: todos os
+// consumidores fazem `[...WHITELIST_24]` no momento da chamada, então a atualização
+// in-place propaga para todas as ferramentas sem tocar em cada arquivo.
+export const WHITELIST_24: string[] = [...WHITELIST_FALLBACK]; // 26 ativos (DADOS_ATIVOS 15/07/2026)
+
+// ── Sincronização dinâmica da whitelist com a aba DADOS_ATIVOS ───────────────
+// Se DADOS_ATIVOS_CSV_URL (endpoint "Publicar na web → CSV" da aba) estiver setada,
+// lê a lista de lá com cache de 4h e atualiza WHITELIST_24 in-place. Em qualquer
+// falha (env ausente, rede, HTTP, conteúdo insuficiente) mantém a lista atual —
+// nunca quebra uma chamada de ferramenta. Chamada uma vez por request no index.ts.
+const WHITELIST_TTL_MS = 4 * 60 * 60 * 1000;   // 4h em sucesso
+const WHITELIST_RETRY_MS = 15 * 60 * 1000;     // 15min após falha
+let whitelistSyncAt = 0;
+let whitelistFonte = "fallback (lista fixa — espelho manual de DADOS_ATIVOS)";
+
+export function getWhitelistFonte(): string { return whitelistFonte; }
+
+export async function sincronizarWhitelist(fetchImpl: typeof fetch = fetch): Promise<{ fonte: string; n: number }> {
+  const url = process.env.DADOS_ATIVOS_CSV_URL?.trim();
+  if (!url) return { fonte: whitelistFonte, n: WHITELIST_24.length };
+  if (Date.now() - whitelistSyncAt < WHITELIST_TTL_MS) return { fonte: whitelistFonte, n: WHITELIST_24.length };
+  try {
+    const novos = await fetchWhitelistCSV(url, fetchImpl);
+    WHITELIST_24.splice(0, WHITELIST_24.length, ...novos); // atualiza a MESMA referência
+    whitelistSyncAt = Date.now();
+    whitelistFonte = `DADOS_ATIVOS (dinâmico via CSV) — ${novos.length} ativos`;
+  } catch (e) {
+    // mantém a lista atual (fallback) e tenta de novo em ~15min
+    whitelistSyncAt = Date.now() - WHITELIST_TTL_MS + WHITELIST_RETRY_MS;
+    whitelistFonte = `fallback (lista fixa; leitura do CSV falhou: ${e instanceof Error ? e.message : String(e)})`;
+  }
+  return { fonte: whitelistFonte, n: WHITELIST_24.length };
+}
 
 const PERIODOS_VALIDOS = [21, 63, 126, 252];
 

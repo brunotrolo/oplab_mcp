@@ -3,7 +3,7 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import axios, { AxiosInstance } from "axios";
-import { getIVRankHistorico, getIVRankBulk, normalizarPeriodo } from "./utils/iv_calculator.js";
+import { getIVRankHistorico, getIVRankBulk, normalizarPeriodo, sincronizarWhitelist } from "./utils/iv_calculator.js";
 import { getBacktestProtocolo2, runQuantBacktest } from "./utils/backtest_engine.js";
 import { getSmartMoneyTracker } from "./utils/smart_money_tracker.js";
 import { getOportunidadesMensais } from "./utils/opportunity_engine.js";
@@ -380,9 +380,9 @@ const TOOL_REGISTRY: ToolDef[] = [
   },
   {
     name: "get_iv_rank_bulk",
-    description: "Calcular IV Rank de vários ativos de uma vez e ranquear por IV Rank decrescente. Sem o parâmetro 'tickers', usa a whitelist padrão de 24 ativos líquidos. Usa cache de 4h (tickers em cache não consomem chamadas) e processa os demais em lotes de 3 com 300ms entre lotes para evitar rate limit (HTTP 429). Ideal para triagem de oportunidades de venda de opções.",
+    description: "Calcular IV Rank de vários ativos de uma vez e ranquear por IV Rank decrescente. Sem o parâmetro 'tickers', usa a whitelist padrão de 26 ativos líquidos (espelho da aba DADOS_ATIVOS; sincronizada dinamicamente se DADOS_ATIVOS_CSV_URL estiver configurada, senão lista fixa). Usa cache de 4h (tickers em cache não consomem chamadas) e processa os demais em lotes de 3 com 300ms entre lotes para evitar rate limit (HTTP 429). Ideal para triagem de oportunidades de venda de opções.",
     properties: {
-      tickers: { type: "array",   description: "Lista de códigos de ações (ex: [\"VALE3\",\"PETR4\"]). Se omitido, usa a whitelist padrão de 24 ativos.", items: { type: "string" } },
+      tickers: { type: "array",   description: "Lista de códigos de ações (ex: [\"VALE3\",\"PETR4\"]). Se omitido, usa a whitelist padrão de 26 ativos (aba DADOS_ATIVOS).", items: { type: "string" } },
       periodo: { type: "integer", description: "Janela em dias úteis para o IV Rank. Padrão: 252. Aceita: 21, 63, 126, 252" },
     },
     required: [],
@@ -393,9 +393,9 @@ const TOOL_REGISTRY: ToolDef[] = [
   {
     name: "get_backtest_protocolo2",
     description:
-      "Ferramenta ANALÍTICA (apenas simula — não executa ordens reais). Faz backtesting histórico do Protocolo 2 (venda de PUTs OTM) sobre dados da OpLab: para cada dia útil aplica os filtros IV Rank, tendência M9/M21 e seleciona a PUT candidata (delta e DTE no range), simulando o resultado no vencimento. Com use_spread=true, simula trava Bull Put Spread (perda limitada) em vez de PUT a descoberto. Retorna resumo geral, comparativo de filtros (prova estatística do valor do protocolo), desempenho por ativo, por mês e curva de capital. Sem 'tickers', usa a whitelist padrão de 24 ativos. Cache de 24h; lotes de 3 ativos com 500ms entre lotes; período máximo de 2 anos.",
+      "Ferramenta ANALÍTICA (apenas simula — não executa ordens reais). Faz backtesting histórico do Protocolo 2 (venda de PUTs OTM) sobre dados da OpLab: para cada dia útil aplica os filtros IV Rank, tendência M9/M21 e seleciona a PUT candidata (delta e DTE no range), simulando o resultado no vencimento. Com use_spread=true, simula trava Bull Put Spread (perda limitada) em vez de PUT a descoberto. Retorna resumo geral, comparativo de filtros (prova estatística do valor do protocolo), desempenho por ativo, por mês e curva de capital. Sem 'tickers', usa a whitelist padrão de 26 ativos (espelho da aba DADOS_ATIVOS). Cache de 24h; lotes de 3 ativos com 500ms entre lotes; período máximo de 2 anos.",
     properties: {
-      tickers:      { type: "array",   description: "Lista de códigos (ex: [\"VALE3\",\"PETR4\"]). Se omitido, usa a whitelist padrão de 24 ativos.", items: { type: "string" } },
+      tickers:      { type: "array",   description: "Lista de códigos (ex: [\"VALE3\",\"PETR4\"]). Se omitido, usa a whitelist padrão de 26 ativos (aba DADOS_ATIVOS).", items: { type: "string" } },
       data_inicio:  { type: "string",  description: "Data inicial YYYY-MM-DD. Padrão: 2 anos atrás." },
       data_fim:     { type: "string",  description: "Data final YYYY-MM-DD. Padrão: hoje." },
       delta_min:    { type: "number",  description: "Delta mínimo (mais negativo) da PUT. Padrão: -0.30" },
@@ -453,9 +453,9 @@ const TOOL_REGISTRY: ToolDef[] = [
   {
     name: "get_smart_money_tracker",
     description:
-      "Rastreia fluxo institucional anômalo na cadeia de opções (Whale & Block Trade Tracker). Caça opções de curto prazo com alto volume financeiro no dia cujo TICKET MÉDIO por negócio é de porte institucional (varejo fracionado não sustenta ticket médio alto). Processa em lotes de 3 com 300ms (evita HTTP 429) e ordena por volume financeiro decrescente. Sem 'tickers', varre a whitelist de 24 ativos. OBS: a OpLab não expõe Open Interest nem gregas na chain — por isso o tracker usa volume/trades/financeiro (dados reais) e retorna delta=null.",
+      "Rastreia fluxo institucional anômalo na cadeia de opções (Whale & Block Trade Tracker). Caça opções de curto prazo com alto volume financeiro no dia cujo TICKET MÉDIO por negócio é de porte institucional (varejo fracionado não sustenta ticket médio alto). Processa em lotes de 3 com 300ms (evita HTTP 429) e ordena por volume financeiro decrescente. Sem 'tickers', varre a whitelist padrão de 26 ativos (espelho da aba DADOS_ATIVOS). OBS: a OpLab não expõe Open Interest nem gregas na chain — por isso o tracker usa volume/trades/financeiro (dados reais) e retorna delta=null.",
     properties: {
-      tickers:                     { type: "array",   description: "Lista de ativos-base a varrer (ex: [\"PETR4\",\"VALE3\"]). Se omitido, usa a whitelist de 24 ativos.", items: { type: "string" } },
+      tickers:                     { type: "array",   description: "Lista de ativos-base a varrer (ex: [\"PETR4\",\"VALE3\"]). Se omitido, usa a whitelist padrão de 26 ativos (aba DADOS_ATIVOS).", items: { type: "string" } },
       min_financial_volume:        { type: "number",  description: "Volume financeiro mínimo da opção no dia, em R$. Padrão: 250000" },
       min_avg_financial_per_trade: { type: "number",  description: "Ticket médio mínimo por negócio (financial_volume / trades), em R$. Padrão: 5000" },
       dte_max:                     { type: "integer", description: "Dias até o vencimento máximo (foco no curto prazo). Padrão: 45" },
@@ -507,7 +507,7 @@ const TOOL_REGISTRY: ToolDef[] = [
     description:
       "Backtest EMPÍRICO: filtrar entradas pela ESTRUTURA de preço melhora o win rate sobre o baseline? Para cada ticker e cada ciclo mensal, reconstrói o estado estrutural (mesma lógica de get_analise_estrutura) usando SÓ candles até a data de entrada (ZERO look-ahead), simula a venda de PUT/trava com a cadeia de opções histórica real, apura no vencimento e compara COORTES (baseline, apenas_iv, apenas_m9m21, apenas_alta_estrutural, alta_estrutural_e_iv, apenas_transicao, rompimento_com_volume, full_stack) por win rate, P&L médio, desvio-padrão e sharpe simplificado. Veredito: ESTRUTURA_TEM_EDGE (lift ≥5pp e n≥30), ESTRUTURA_SEM_EDGE ou AMOSTRA_INSUFICIENTE. Determinístico. Não é sinal de compra/venda.",
     properties: {
-      tickers:        { type: "array",   description: "Lista de códigos (ex: [\"VALE3\",\"PSSA3\"]). Se omitido, usa a whitelist padrão de 24 ativos." },
+      tickers:        { type: "array",   description: "Lista de códigos (ex: [\"VALE3\",\"PSSA3\"]). Se omitido, usa a whitelist padrão de 26 ativos (aba DADOS_ATIVOS)." },
       lookback_meses: { type: "integer", description: "Janela de histórico em meses (padrão: 24; teto 24)." },
       dte_alvo:       { type: "integer", description: "DTE da entrada simulada (padrão: 25)." },
       delta_alvo:     { type: "number",  description: "Delta alvo da PUT vendida (padrão: -0.25)." },
@@ -580,6 +580,11 @@ function createServer(): Server {
   const start = Date.now();
   console.log(JSON.stringify({ event: "tool_call", tool: name }));
   try {
+    // Mantém a whitelist padrão (fallback quando `tickers` não é informado) em dia
+    // com a aba DADOS_ATIVOS. No-op barato quando em cache (4h) ou sem CSV configurado;
+    // nunca quebra a chamada. Atualiza WHITELIST_24 in-place, então vale p/ todas as tools.
+    try { await sincronizarWhitelist(); } catch { /* fallback já garante a lista */ }
+
     // Ferramentas compostas usam handler próprio; as simples mapeiam para um GET.
     const data = entry.handler
       ? await entry.handler(oplabClient, args as Record<string, unknown>)
