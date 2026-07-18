@@ -625,6 +625,25 @@ function createServer(): Server {
 
 const app = express();
 
+// ---------------------------------------------------------------------------
+// Ícone do conector (favicon). O claude.ai deriva o ícone do conector custom a
+// partir do favicon servido no host da URL. Servimos um ícone de "ferramenta de
+// análise" (gráfico de candles) para dar identidade profissional ao conector.
+// ---------------------------------------------------------------------------
+const FAVICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="7" fill="#0B2F53"/><g stroke="#4FC3F7" stroke-width="2" stroke-linecap="round"><path d="M10 7v18M22 7v18"/></g><rect x="7.5" y="12" width="5" height="9" rx="1" fill="#4FC3F7"/><rect x="19.5" y="15" width="5" height="8" rx="1" fill="#2ECC71"/></svg>`;
+
+function serveFavicon(_req: Request, res: Response) {
+  res.set("Content-Type", "image/svg+xml");
+  res.set("Cache-Control", "public, max-age=86400");
+  res.send(FAVICON_SVG);
+}
+app.get("/favicon.svg", serveFavicon);
+app.get("/favicon.ico", serveFavicon);
+app.get("/", (_req: Request, res: Response) => {
+  res.set("Content-Type", "text/html; charset=utf-8");
+  res.send(`<!doctype html><html><head><meta charset="utf-8"><title>OpLab MCP</title><link rel="icon" type="image/svg+xml" href="/favicon.svg"></head><body style="font-family:sans-serif;background:#0B2F53;color:#fff"><h1>OpLab MCP</h1><p>Servidor MCP de analise de mercado. Endpoint: <code>/mcp</code></p></body></html>`);
+});
+
 app.get("/health", async (_req: Request, res: Response) => {
   try {
     await oplabClient.get("/market/status", { timeout: 5_000 });
